@@ -1,0 +1,114 @@
+# Build one package + gates, with the LLM build-doctor on the failure path.
+# Runs on ubuntu-latest: bin/build-package spins its own alpine:3.22 container.
+name: build
+on:
+  workflow_call:
+    inputs:
+      package: { type: string, required: true, default: php83-pdo_snowflake }
+      runner:  { type: string, required: false, default: ubuntu-latest }
+      alpine:  { type: string, required: false, default: "3.22" }
+    # Signing/model secrets come from the `Builder` environment (see the job's
+    # `environment:` below), not from the caller — so they are NOT declared here.
+  workflow_dispatch:
+    inputs:
+      package: { type: string, required: true, default: php83-pdo_snowflake }
+      runner:  { type: string, required: false, default: ubuntu-latest }
+      alpine:  { type: string, required: false, default: "3.22" }
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}     # ubuntu-latest (x86_64) or ubuntu-24.04-arm (aarch64)
+    # Access the `Builder` environment's secrets (ABUILD_ACTIVE_KEY, OPENAI_API_KEY).
+    # A reusable-workflow CALLER job can't set `environment:`, so it lives here on
+    # the actual build job. Configure Builder for "All branches" (no protection
+    # rules) so main + development builds both run without pausing for approval.
+    environment: Builder
+    permissions:
+      contents: write         # fix-loop PR branch + gh-pages publish push
+      pull-requests: write    # fix-loop review PR
+    env:
+      # Swappable SaaS model for the fix-loop (auto/llm-fix-loop.md). If the key
+      # is absent the loop is skipped and the failure escalates as needs-human.
+      OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+      OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}
+      FIXLOOP_MODEL:   ${{ vars.FIXLOOP_MODEL }}
+      # `secrets` can't be used in an `if:`; surface presence as a job env flag.
+      HAS_SIGNING_KEY: ${{ secrets.ABUILD_ACTIVE_KEY != '' }}
+      ALPINE_VER: ${{ inputs.alpine }}    # target Alpine release for build + verify
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore signing key
+        if: env.HAS_SIGNING_KEY == 'true'
+        run: |
+          mkdir -p .build/keys
+          # The key file MUST be named exactly like the committed keyring public
+          # key: abuild-sign tags each signature with the private key's basename,
+          # and consumers only have <that-name>.pub in /etc/apk/keys. A mismatched
+          # name (e.g. active.rsa) yields an UNTRUSTED, unverifiable repo.
+          name=$(basename "$(ls keys/keyring/*.rsa.pub | head -1)" .pub)
+          printf '%s' "${{ secrets.ABUILD_ACTIVE_KEY }}" > ".build/keys/$name"
+          cp "keys/keyring/$name.pub" ".build/keys/$name.pub"
+
+      # Fail hard if the ACTIVE signing key is missing — never build/publish with
+      # an insecure throwaway key (defense in depth; build-package also refuses).
+      - name: Require signing key
+        if: env.HAS_SIGNING_KEY != 'true'
+        run: |
+          echo "::error title=Missing signing key::ABUILD_ACTIVE_KEY is unavailable to this job. Check the 'Builder' environment (secret present, all branches allowed, no required reviewer). Refusing to build unsigned."
+          exit 1
+
+      - name: Build + gates
+        id: build
+        run: ./bin/build-package "${{ inputs.package }}"
+        continue-on-error: true
+
+      # --- Failure path: LLM build-doctor -----------------------------------
+      - name: Fix loop (author a musl patch on failure)
+        id: fix
+        if: steps.build.outcome == 'failure' && env.OPENAI_API_KEY != ''
+        run: ./bin/fix-loop "${{ inputs.package }}" .build/build.log
+
+      - name: Rebuild after fix
+        if: steps.fix.outcome == 'success'
+        run: ./bin/build-package "${{ inputs.package }}"
+
+      - name: Open review PR for the candidate patch (never auto-merged)
+        if: steps.fix.outcome == 'success'
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          pkg="${{ inputs.package }}"
+          br="fixloop/$pkg-$(date -u +%Y%m%d%H%M%S)"
+          git switch -c "$br"
+          git add "packages/$pkg"
+          git commit -m "fix-loop($pkg): candidate musl patch (HELD FOR REVIEW)"
+          git push -u origin "$br"
+          gh pr create --fill --label "needs-human,llm-authored" \
+            --body "Automated musl fix from the build-doctor. **Review before merge** — 'it compiles' != 'it's correct'." || true
+
+      - name: Escalate (needs-human)
+        if: steps.build.outcome == 'failure' && steps.fix.outcome != 'success'
+        run: |
+          echo "::error::build failed and the fix-loop did not resolve it — needs-human"
+          exit 1
+
+      - name: Acceptance (clean-image install + load + glibc audit)
+        if: steps.build.outcome == 'success' || steps.fix.outcome == 'success'
+        run: ./bin/verify-acceptance "${{ inputs.package }}"
+      # Stage this runner's arch apks and upload as an arch-named artifact; the
+      # ci `publish` job fans these in and pushes a single multi-arch gh-pages.
+      - name: Stage apks by version + arch
+        id: stage
+        if: steps.build.outcome == 'success' || steps.fix.outcome == 'success'
+        run: |
+          arch=$(uname -m)
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+          mkdir -p "dist/${{ inputs.alpine }}/$arch"
+          cp .build/packages/*/"$arch"/*.apk "dist/${{ inputs.alpine }}/$arch/"
+          ls -la "dist/${{ inputs.alpine }}/$arch"
+      - name: Upload apks
+        if: steps.build.outcome == 'success' || steps.fix.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apks-${{ inputs.package }}-${{ inputs.alpine }}-${{ steps.stage.outputs.arch }}
+          path: dist/
+          if-no-files-found: error

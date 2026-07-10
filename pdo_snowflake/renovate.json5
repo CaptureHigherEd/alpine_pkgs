@@ -1,0 +1,12 @@
+{
+  // Renovate keeps THIS repo's own tooling fresh (GitHub Actions versions only).
+  //
+  // The php83-pdo_snowflake upstream PAIR (pdo_snowflake <-> libsnowflakeclient)
+  // is deliberately NOT handled by Renovate: the two repos must move ATOMICALLY
+  // to the pair the pdo CHANGELOG declares — a cross-repo constraint Renovate's
+  // per-dependency model can't express. That detection is bin/reconcile, run on a
+  // schedule by .github/workflows/reconcile.yml (auto/autonomy.md §2).
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+  enabledManagers: ["github-actions"],
+}

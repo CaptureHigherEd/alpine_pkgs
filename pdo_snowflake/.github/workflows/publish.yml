@@ -1,0 +1,36 @@
+# Sign + publish the APKINDEX after gates pass. Phase 1: builds the signed site/
+# tree locally; pushing it to the gh-pages backend at apk.<domain> is the
+# remaining wiring (marked TODO in bin/publish).
+name: publish
+on:
+  workflow_call:
+    inputs:
+      package: { type: string, required: true }
+    # ABUILD_ACTIVE_KEY comes from the `Builder` environment (job below), not the caller.
+  workflow_dispatch:
+    inputs:
+      package: { type: string, required: true, default: php83-pdo_snowflake }
+
+permissions:
+  contents: write               # to push the gh-pages/site branch (TODO)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: Builder      # ABUILD_ACTIVE_KEY lives here
+    steps:
+      - uses: actions/checkout@v4
+      # NB: publish must run against apks + the ACTIVE key produced by build.yml.
+      # In a real pipeline, build+publish share a runner/artifacts and the key
+      # comes from the secret; never publish an unverified build (gates first).
+      - name: Restore signing key
+        run: |
+          mkdir -p .build/keys
+          # name must match the committed keyring pubkey (see build.yml note)
+          name=$(basename "$(ls keys/keyring/*.rsa.pub | head -1)" .pub)
+          printf '%s' "${{ secrets.ABUILD_ACTIVE_KEY }}" > ".build/keys/$name"
+          cp "keys/keyring/$name.pub" ".build/keys/$name.pub"
+      - name: Publish (prune -> index -> sign -> keyring)
+        run: ./bin/publish "${{ inputs.package }}"
+      # TODO(Phase 1): push site/ to gh-pages served at apk.<domain> (custom-domain
+      #   CNAME = the portability anchor). See auto/build-pipeline.md §6.

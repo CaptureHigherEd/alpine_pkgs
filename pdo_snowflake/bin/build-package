@@ -1,0 +1,109 @@
+#!/bin/sh
+# build-package <package> [arch] — build one package with abuild and run its
+# check() gates. On a non-Alpine host it runs abuild inside an alpine:3.22
+# container (this repo's build environment). See auto/build-pipeline.md §5.
+#
+# Outputs signed .apk(s) to .build/packages/<repo>/<arch>/ (gitignored).
+# The signing keypair is generated once and persisted in .build/keys/ (gitignored;
+# in CI the ACTIVE private key is a secret, not this local throwaway key).
+#
+# Phase 1: deterministic build + gates. fix-loop/needs-human handling is Phase 3.
+set -eu
+die() { echo "build-package: $*" >&2; exit 2; }
+
+pkg=${1:-} ; [ -n "$pkg" ] || die "usage: build-package <package> [arch]"
+arch=${2:-$(uname -m)}
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+[ -d "$REPO/packages/$pkg" ] || die "no such package: packages/$pkg"
+# Target Alpine release (e.g. 3.22). Drives the base image AND the apk repo URLs
+# so the build runs against that release's musl/toolchain/php.
+ALPINE_VER=${ALPINE_VER:-3.22}
+IMAGE=${BUILD_IMAGE:-alpine:$ALPINE_VER}
+
+# --- native path (already on Alpine) -----------------------------------------
+if command -v abuild >/dev/null 2>&1; then
+	export REPODEST="$REPO/.build/packages"
+	mkdir -p "$REPODEST"
+	cd "$REPO/packages/$pkg"
+	abuild checksum
+	exec abuild -F -r
+fi
+
+# --- containerized path (non-Alpine host) ------------------------------------
+command -v docker >/dev/null 2>&1 || die "need docker (or run on Alpine with abuild)"
+mkdir -p "$REPO/.build/keys" "$REPO/.build/packages"
+# Foreign-arch builds run under QEMU/binfmt (register once with
+# `docker run --privileged tonistiigi/binfmt --install all`). Native arch => no
+# emulation. NB: an emulated aarch64 from-source build is very slow — prefer a
+# native aarch64 runner in CI.
+plat=""
+if [ "$arch" != "$(uname -m)" ]; then
+	case "$arch" in
+		aarch64) plat="--platform linux/arm64" ;;
+		x86_64)  plat="--platform linux/amd64" ;;
+		*) die "unsupported cross arch: $arch" ;;
+	esac
+	echo "build-package: cross-building for $arch under emulation ($plat)"
+fi
+
+# SECURITY: require the ACTIVE signing key. Never silently fall back to a
+# throwaway key — that produces insecure, non-verifiable packages. A throwaway is
+# permitted ONLY for an explicit local dev build (BUILD_ALLOW_THROWAWAY_KEY=1).
+if ! ls "$REPO/.build/keys/"*.rsa >/dev/null 2>&1; then
+	if [ "${BUILD_ALLOW_THROWAWAY_KEY:-0}" = 1 ]; then
+		echo "build-package: WARNING — no signing key; minting a THROWAWAY key (dev only, DO NOT publish)" >&2
+	else
+		die "no signing key in .build/keys/ — refusing to build with a throwaway (insecure) key.
+  Provide the ACTIVE key: CI = the 'Builder' environment secret ABUILD_ACTIVE_KEY;
+  local = run ../gen-active-key.sh and copy the .rsa/.rsa.pub into .build/keys/.
+  For an explicit local dev build, set BUILD_ALLOW_THROWAWAY_KEY=1."
+	fi
+fi
+
+echo "build-package: building '$pkg' ($arch) in $IMAGE ..."
+
+# Bootstrap runs as root inside the container. $1=package.
+bootstrap='
+set -eu
+export HOME=/root PACKAGER="PDOSnowAlpine <jmaclachlan@zemlyaozer.com>"
+apk add --no-cache alpine-sdk >/dev/null
+# Enable main+community (php83* live in community) and cache the index so
+# abuild -r can resolve makedepends/checkdepends.
+printf "%s\n%s\n" \
+	"https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_VER/main" \
+	"https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_VER/community" > /etc/apk/repositories
+apk update >/dev/null
+mkdir -p /root/.abuild /keys "$REPODEST"
+# NB: we install the pubkey to /etc/apk/keys ourselves (we are root) instead of
+# abuild-keygen -i, which shells out to doas (not present) and would 127.
+if ls /keys/*.rsa >/dev/null 2>&1; then
+	cp /keys/*.rsa /keys/*.rsa.pub /root/.abuild/
+	cp /keys/*.rsa.pub /etc/apk/keys/
+	priv=$(ls /root/.abuild/*.rsa | grep -v "\.pub$" | head -1)
+	echo "PACKAGER_PRIVKEY=\"$priv\"" > /root/.abuild/abuild.conf
+else
+	abuild-keygen -a -n >/dev/null 2>&1
+	cp /root/.abuild/*.rsa.pub /etc/apk/keys/
+	cp /root/.abuild/*.rsa /root/.abuild/*.rsa.pub /keys/
+fi
+cd "/repo/packages/$1"
+abuild -F checksum
+abuild -F -r
+echo "== built apks =="
+find "$REPODEST" -name "*.apk" -newermt "-1 hour" 2>/dev/null || find "$REPODEST" -name "*.apk"
+'
+
+# --user 0 = container-root. Under rootless podman this maps to the host user
+# (who owns the mounts), so apk works AND files land owned by us on the host.
+# Harmless on real Docker (root is already root).
+# Log to .build/build.log (fix-loop consumes it on failure) and return the real
+# exit code so the caller can trigger the fix loop.
+mkdir -p "$REPO/.build"
+docker run --rm --user 0 $plat \
+	-e REPODEST=/repo/.build/packages -e ALPINE_VER="$ALPINE_VER" \
+	-v "$REPO":/repo \
+	-v "$REPO/.build/keys":/keys \
+	"$IMAGE" sh -euc "$bootstrap" _ "$pkg" > "$REPO/.build/build.log" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { echo "build-package: FAILED (rc=$rc); tail of .build/build.log:"; tail -25 "$REPO/.build/build.log"; }
+exit "$rc"

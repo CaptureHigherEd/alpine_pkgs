@@ -1,0 +1,64 @@
+#!/bin/sh
+# resolve-pair <package> — resolve the COHERENT (pdo_ref, client_tag) pair and
+# print it as JSON. This is the #1 correctness guard: pdo_snowflake and
+# libsnowflakeclient are versioned together and their tags drift out of sync, so
+# we NEVER take "latest tag" of each independently. The pair the pdo CHANGELOG
+# declares ("Updated the `libsnowflakeclient` to vX.Y.Z") is authoritative.
+# See packages/*/README.md and auto/build-pipeline.md §3.
+#
+# Output (stdout, one JSON object):
+#   {"version":"<client_tag>+pdo.<short>","pdo_ref":"<sha>","client_tag":"vX.Y.Z",
+#    "pdo_channel":"master|tag","pdo_display":"<tag-or-short-sha>"}
+# Env: GITHUB_TOKEN (optional) raises the API rate limit.
+set -eu
+die() { echo "resolve-pair: $*" >&2; exit 2; }
+command -v jq >/dev/null 2>&1 || die "need jq"
+command -v curl >/dev/null 2>&1 || die "need curl"
+
+pkg=${1:-} ; [ -n "$pkg" ] || die "usage: resolve-pair <package>"
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+mf="$REPO/packages/$pkg/manifest.toml"
+[ -f "$mf" ] || die "no manifest: $mf"
+
+_get() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$mf" | head -1; }
+pdo_repo=$(_get pdo_repo);     [ -n "$pdo_repo" ]     || die "manifest missing pdo_repo"
+client_repo=$(_get client_repo); [ -n "$client_repo" ] || die "manifest missing client_repo"
+pdo_channel=$(_get pdo_channel); [ -n "$pdo_channel" ] || pdo_channel=master
+
+api() { curl -fsSL -m 25 ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} \
+	-H "Accept: application/vnd.github+json" "$1"; }
+
+# 1) resolve the pdo ref for the configured channel
+case "$pdo_channel" in
+	master)
+		pdo_ref=$(api "https://api.github.com/repos/$pdo_repo/commits/master" | jq -r .sha)
+		clog_ref=master ; pdo_display=$(echo "$pdo_ref" | cut -c1-7) ;;
+	tag)
+		tag=$(api "https://api.github.com/repos/$pdo_repo/releases/latest" | jq -r .tag_name)
+		[ -n "$tag" ] && [ "$tag" != null ] || die "no latest release tag for $pdo_repo"
+		pdo_ref=$(api "https://api.github.com/repos/$pdo_repo/commits/$tag" | jq -r .sha)
+		clog_ref=$tag ; pdo_display=$tag ;;
+	*) die "unknown pdo_channel: $pdo_channel (want master|tag)" ;;
+esac
+[ -n "$pdo_ref" ] && [ "$pdo_ref" != null ] || die "could not resolve pdo_ref"
+
+# 2) parse the paired client version from the CHANGELOG at that ref (newest-first;
+#    first "libsnowflakeclient ... to vX.Y.Z" applies to the top release)
+clog=$(curl -fsSL -m 25 "https://raw.githubusercontent.com/$pdo_repo/$clog_ref/CHANGELOG.md") \
+	|| die "could not fetch CHANGELOG at $clog_ref"
+# The first (topmost) "... libsnowflakeclient ... vX.Y.Z" line is the client the
+# top release pairs with; the first vX.Y.Z on that line is the client version
+# (the trailing "(...#NNN)" PR ref carries no v-prefixed version).
+client_tag=$(printf '%s\n' "$clog" \
+	| grep -i libsnowflakeclient \
+	| head -1 | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+[ -n "$client_tag" ] || die "no 'libsnowflakeclient to vX.Y.Z' in CHANGELOG@$clog_ref"
+
+# 3) sanity: the client tag must be a real release tag upstream
+api "https://api.github.com/repos/$client_repo/git/ref/tags/$client_tag" >/dev/null 2>&1 \
+	|| die "paired client tag $client_tag not found in $client_repo"
+
+# 4) emit
+jq -cn --arg v "$client_tag+pdo.$(echo "$pdo_ref" | cut -c1-7)" \
+	--arg p "$pdo_ref" --arg c "$client_tag" --arg ch "$pdo_channel" --arg d "$pdo_display" \
+	'{version:$v, pdo_ref:$p, client_tag:$c, pdo_channel:$ch, pdo_display:$d}'

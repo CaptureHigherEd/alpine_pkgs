@@ -1,0 +1,22 @@
+# mini-swe-agent config for the build-doctor (auto/llm-fix-loop.md).
+# SCAFFOLD — shape only; wire in Phase 3. mini-swe-agent runs actions through
+# plain subprocess/bash, so it executes INSIDE the Alpine build env and sees the
+# exact failing toolchain. Model is resolved from llm/model.env (litellm).
+#
+# Swap target: OpenHands (managed control plane + Docker sandbox) behind the same
+# bin/fix-loop contract — the agent choice is not load-bearing.
+
+agent:
+  system_template_file: prompts/musl-fix.md
+  step_limit: 30                # per attempt; the outer <=3-attempt cap is bin/fix-loop
+  cost_limit: 2.00              # USD; also enforced by FIXLOOP_MAX_SPEND_USD
+
+model:
+  # from env: OPENAI_BASE_URL / OPENAI_API_KEY / FIXLOOP_MODEL
+  name_env: FIXLOOP_MODEL
+  fallback_env: FIXLOOP_MODEL_FALLBACK
+
+environment:
+  cwd: /build                   # the package source tree, inside the Alpine env
+  # The agent may edit source and re-run abuild; it CANNOT touch signing keys
+  # (separate CI secret, injected only at publish) or other packages.

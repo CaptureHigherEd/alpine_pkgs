@@ -1,0 +1,40 @@
+diff --git a/deps/cmocka-1.1.1/include/cmocka.h b/deps/cmocka-1.1.1/include/cmocka.h
+index 72d6ae2..f1ed038 100644
+--- a/deps/cmocka-1.1.1/include/cmocka.h
++++ b/deps/cmocka-1.1.1/include/cmocka.h
+@@ -109,7 +109,11 @@ typedef uintmax_t LargestIntegralType;
+ #define cast_to_largest_integral_type(value) \
+     ((LargestIntegralType)(value))
+ 
+-/* Smallest integral type capable of holding a pointer. */
++/* Smallest integral type capable of holding a pointer.
++ * cmocka 1.1.1 hand-rolled a uintptr_t typedef keyed off glibc's __WORDSIZE,
++ * which mis-detects on musl libc and then conflicts with musl's own
++ * uintptr_t. C99 <stdint.h> provides the correct definition on every
++ * non-Windows platform this library builds on; use it. */
+ #if !defined(_UINTPTR_T) && !defined(_UINTPTR_T_DEFINED)
+ # if defined(_WIN32)
+     /* WIN32 is an ILP32 platform */
+@@ -117,21 +121,7 @@ typedef uintmax_t LargestIntegralType;
+ # elif defined(_WIN64)
+     typedef unsigned long int uintptr_t
+ # else /* _WIN32 */
+-
+-/* ILP32 and LP64 platforms */
+-#  ifdef __WORDSIZE /* glibc */
+-#   if __WORDSIZE == 64
+-      typedef unsigned long int uintptr_t;
+-#   else
+-      typedef unsigned int uintptr_t;
+-#   endif /* __WORDSIZE == 64 */
+-#  else /* __WORDSIZE */
+-#   if defined(_LP64) || defined(_I32LPx)
+-      typedef unsigned long int uintptr_t;
+-#   else
+-      typedef unsigned int uintptr_t;
+-#   endif
+-#  endif /* __WORDSIZE */
++#  include <stdint.h>
+ # endif /* _WIN32 */
+ 
+ # define _UINTPTR_T

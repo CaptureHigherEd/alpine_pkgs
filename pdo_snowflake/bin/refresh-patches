@@ -1,0 +1,68 @@
+#!/bin/sh
+# refresh-patches <package> [--apply] — keep the musl patch set from rotting on an
+# upstream bump (auto/autonomy.md §5). Clones the client at the pinned tag and,
+# for each patch in NNN order (tested cumulatively, matching build order):
+#
+#   applies clean            -> KEEP    (and apply it, so later patches see it)
+#   reverse-applies clean    -> RETIRE  (upstream already carries this fix)
+#   neither                  -> FUZZ    (hand to the LLM fix loop)
+#
+# --apply: drop RETIRE patches from the APKBUILD source= + delete the file, and
+# regenerate sha512sums. FUZZ patches are reported for bin/fix-loop; nothing is
+# force-applied silently.
+set -eu
+die() { echo "refresh-patches: $*" >&2; exit 2; }
+command -v git >/dev/null 2>&1 || die "need git"
+
+pkg=${1:-} ; [ -n "$pkg" ] || die "usage: refresh-patches <package> [--apply]"
+apply=0; [ "${2:-}" = "--apply" ] && apply=1
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd); cd "$REPO"
+pdir="packages/$pkg"; apkb="$pdir/APKBUILD"; mf="$pdir/manifest.toml"
+[ -f "$apkb" ] || die "no APKBUILD for $pkg"
+mget() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$mf" | head -1; }
+client_repo=$(mget client_repo); client_tag=$(mget client_tag)
+[ -n "$client_repo" ] && [ -n "$client_tag" ] || die "manifest missing client_repo/client_tag"
+
+clone=$(mktemp -d)
+trap 'rm -rf "$clone"' EXIT
+echo "refresh-patches: cloning $client_repo@$client_tag ..."
+git clone --depth 1 --branch "$client_tag" "https://github.com/$client_repo" "$clone" >/dev/null 2>&1 \
+	|| die "clone failed ($client_repo@$client_tag)"
+
+retire=""; fuzz=""; keep=""
+for p in "$pdir"/[0-9][0-9][0-9]-*.patch; do
+	[ -e "$p" ] || continue
+	name=$(basename "$p")
+	if git -C "$clone" apply --check "$REPO/$p" >/dev/null 2>&1; then
+		git -C "$clone" apply "$REPO/$p" >/dev/null 2>&1 || true   # apply for cumulative order
+		keep="$keep $name"; echo "  KEEP    $name"
+	elif git -C "$clone" apply -R --check "$REPO/$p" >/dev/null 2>&1; then
+		retire="$retire $name"; echo "  RETIRE  $name  (upstream already carries this)"
+	else
+		fuzz="$fuzz $name"; echo "  FUZZ    $name  (needs bin/fix-loop)"
+	fi
+done
+
+echo "refresh-patches: keep=$(echo $keep|wc -w) retire=$(echo $retire|wc -w) fuzz=$(echo $fuzz|wc -w)"
+[ -n "$fuzz" ] && echo "refresh-patches: FUZZ patches need the fix loop:$fuzz" >&2
+
+if [ "$apply" = 0 ]; then
+	[ -n "$retire" ] && echo "(dry-run; --apply would drop:$retire)"
+	exit 0
+fi
+
+for name in $retire; do
+	echo "refresh-patches: retiring $name"
+	# remove the "        NNN-*.patch" line from source=
+	sed -i "\|[[:space:]]*$name\$|d" "$apkb"
+	git rm -q "$pdir/$name" 2>/dev/null || rm -f "$pdir/$name"
+done
+if [ -n "$retire" ]; then
+	# regenerate checksums (container: abuild lives on Alpine)
+	docker run --rm --user 0 -v "$REPO":/repo "${BUILD_IMAGE:-alpine:3.22}" sh -euc '
+		apk add --no-cache alpine-sdk >/dev/null
+		cd /repo/'"$pdir"'; abuild -F checksum' >/dev/null 2>&1 \
+		|| echo "refresh-patches: WARN could not run abuild checksum (do it before build)"
+	echo "refresh-patches: dropped$retire and refreshed checksums"
+fi
+[ -n "$fuzz" ] && exit 3 || exit 0    # nonzero if human/fix-loop work remains

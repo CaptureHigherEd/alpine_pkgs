@@ -1,0 +1,17 @@
+PDOSnowAlpine — self-maintaining Alpine/musl packages
+Copyright 2026 PDOSnowAlpine maintainers
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository packages and patches third-party software for Alpine/musl. Those
+upstreams retain their own copyrights and licenses:
+
+  - snowflakedb/pdo_snowflake        — Apache-2.0
+  - snowflakedb/libsnowflakeclient   — Apache-2.0
+    and its vendored dependencies (openssl, curl, aws-sdk-cpp, arrow, boost,
+    azure-storage-cpplite, cmocka, jemalloc, zlib, uuid, picojson, toml++, cJSON)
+    under their respective licenses.
+
+Patches under packages/*/patches/ are derivative works of the corresponding
+upstream source and are licensed inbound=outbound under Apache-2.0. Each patch
+carries a provenance note identifying the upstream file and version it targets.

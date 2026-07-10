@@ -1,0 +1,16 @@
+diff --git a/scripts/build_arrow.sh b/scripts/build_arrow.sh
+index 26f71a7..e974994 100755
+--- a/scripts/build_arrow.sh
++++ b/scripts/build_arrow.sh
+@@ -26,7 +26,10 @@ source $DIR/utils.sh
+ if [[ -n "$ARROW_FROM_SOURCE" ]]; then
+     $DIR/build_boost_source.sh -t $target
+     $DIR/build_arrow_source.sh -t $target
+-    exit 0
++    # This script is *sourced* by build_dependencies.sh; a bare `exit 0` here
++    # terminates the whole dependency build early (build_tomlplusplus.sh is
++    # never reached). `return` when sourced, `exit` when executed directly.
++    return 0 2>/dev/null || exit 0
+ fi
+ 
+ cd $DIR/../deps-build

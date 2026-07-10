@@ -1,0 +1,65 @@
+#!/bin/sh
+# e2e <package> [arch] — run a package's END-TO-END suite against the BUILT .apk
+# in a clean Alpine runtime image. Proves the shipped package actually WORKS
+# (connects, queries, moves data) — not just that it loads. This is the quality
+# gate above bin/verify-acceptance's smoke test.
+#
+# Generic by design (for the wider Alpine-package framework): it installs the
+# built apk into a runtime container and runs packages/<pkg>/e2e/run.sh, which
+# holds the package-specific test logic. See docs/e2e.md.
+#
+# Credentials come from the environment (CI: the `Builder` environment secrets).
+# If a manifest-declared required var is missing, e2e SKIPS cleanly (exit 0) so
+# it never blocks a keyless build — UNLESS E2E_REQUIRED=1, which makes missing
+# creds fatal (use that once the test account exists, to gate publish).
+set -eu
+die() { echo "e2e: $*" >&2; exit 2; }
+
+pkg=${1:-} ; [ -n "$pkg" ] || die "usage: e2e <package> [arch]"
+arch=${2:-$(uname -m)}
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd); cd "$REPO"
+pdir="packages/$pkg"; mf="$pdir/manifest.toml"; apkb="$pdir/APKBUILD"
+[ -f "$mf" ] || die "no manifest for $pkg"
+ALPINE_VER=${ALPINE_VER:-3.24}
+IMAGE=${BUILD_IMAGE:-alpine:$ALPINE_VER}
+
+# [e2e].enabled ?
+en=$(sed -n 's/^[[:space:]]*enabled[[:space:]]*=[[:space:]]*\(true\|false\).*/\1/p' "$mf" | head -1)
+[ "$en" = "true" ] || { echo "e2e: not enabled for $pkg (manifest [e2e].enabled) — skipping"; exit 0; }
+[ -f "$pdir/e2e/run.sh" ] || die "[e2e].enabled but $pdir/e2e/run.sh is missing"
+
+# required_env present? (declared in manifest [e2e].required_env)
+req=$(sed -n 's/^[[:space:]]*required_env[[:space:]]*=[[:space:]]*\[\(.*\)\].*/\1/p' "$mf" | tr -d '" ' | tr ',' ' ')
+missing=""
+for v in $req; do eval "val=\${$v:-}"; [ -n "${val:-}" ] || missing="$missing $v"; done
+if [ -n "$missing" ]; then
+	[ "${E2E_REQUIRED:-0}" = 1 ] && die "missing creds for e2e (publish is gated):$missing"
+	echo "e2e: SKIP $pkg — required creds absent:$missing  (set E2E_REQUIRED=1 to make this a hard gate)"
+	exit 0
+fi
+
+# built apk for this pkg/arch
+apkfile=$(find "$REPO/.build/packages" -path "*/$arch/$pkg-[0-9]*.apk" 2>/dev/null | sort | tail -1)
+[ -n "$apkfile" ] || die "no built apk for $pkg/$arch under .build/packages — run build-package first"
+pdo_ref=$(sed -n 's/^_pdo_ref=//p' "$apkb" | head -1)   # pinned test-suite ref
+command -v docker >/dev/null 2>&1 || die "need docker"
+
+# forward the declared creds (by name, value inherited) + context into the container
+set -- --rm --user 0 -e "ALPINE_VER=$ALPINE_VER" -e "PDO_REF=$pdo_ref"
+for v in $req; do set -- "$@" -e "$v"; done
+
+echo "e2e: $pkg ($arch, alpine $ALPINE_VER) against $(basename "$apkfile")"
+docker run "$@" \
+	-v "$(dirname "$apkfile")":/artifact:ro \
+	-v "$REPO/keys/keyring":/keyring:ro \
+	-v "$REPO/$pdir/e2e":/e2e:ro \
+	"$IMAGE" sh -euc '
+		cp /keyring/*.rsa.pub /etc/apk/keys/ 2>/dev/null || true
+		printf "%s\n%s\n" \
+			"https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_VER/main" \
+			"https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_VER/community" > /etc/apk/repositories
+		apk update >/dev/null
+		# install the SHIPPED artifact (signed; verified against the keyring) + deps
+		apk add --no-cache /artifact/'"$(basename "$apkfile")"' >/dev/null
+		exec sh /e2e/run.sh
+	'

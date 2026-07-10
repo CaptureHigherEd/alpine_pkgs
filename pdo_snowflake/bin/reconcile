@@ -1,0 +1,108 @@
+#!/bin/sh
+# reconcile <package> [--apply] [--pr] — the Phase 2 detection controller.
+#
+# Compares the coherent upstream pair (bin/resolve-pair) against the pins in
+# manifest.toml and, on drift, bumps manifest.toml + APKBUILD and (optionally)
+# opens a PR. Runs on a schedule from .github/workflows/reconcile.yml.
+#
+# Why a controller and not a Renovate custom datasource: the two repos must move
+# ATOMICALLY as the pair the pdo CHANGELOG declares — a cross-repo constraint
+# Renovate's per-dep model can't express. This is the plan's documented fallback
+# (auto/autonomy.md §2 "The fallback engine").
+#
+#   (no flag) dry-run: report drift only
+#   --apply   write the new pins into manifest.toml + APKBUILD
+#   --pr      --apply, then branch + commit + push + `gh pr create`
+set -eu
+die() { echo "reconcile: $*" >&2; exit 2; }
+
+pkg=${1:-} ; [ -n "$pkg" ] || die "usage: reconcile <package> [--apply] [--pr]"
+shift || true
+apply=0; pr=0
+for a in "$@"; do case "$a" in
+	--apply) apply=1 ;;
+	--pr)    apply=1; pr=1 ;;
+	*) die "unknown arg: $a" ;;
+esac; done
+
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd); cd "$REPO"
+mf="packages/$pkg/manifest.toml"; apkb="packages/$pkg/APKBUILD"
+[ -f "$mf" ] && [ -f "$apkb" ] || die "missing manifest/APKBUILD for $pkg"
+short() { printf %s "$1" | cut -c1-7; }
+mget() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$mf" | head -1; }
+
+res=$("$REPO/bin/resolve-pair" "$pkg") || die "resolve-pair failed"
+new_pdo=$(printf '%s' "$res" | jq -r .pdo_ref)
+new_client=$(printf '%s' "$res" | jq -r .client_tag)
+new_disp=$(printf '%s' "$res" | jq -r .pdo_display)
+cur_pdo=$(mget pdo_ref); cur_client=$(mget client_tag)
+
+if [ "$new_pdo" = "$cur_pdo" ] && [ "$new_client" = "$cur_client" ]; then
+	echo "reconcile: $pkg up to date ($cur_client / $(short "$cur_pdo"))"
+	exit 0
+fi
+
+echo "reconcile: DRIFT for $pkg"
+echo "  client: $cur_client -> $new_client"
+echo "  pdo:    $(short "$cur_pdo") -> $(short "$new_pdo")"
+[ "$apply" = 1 ] || { echo "(dry-run; --apply to write pins, --pr to open a PR)"; exit 0; }
+
+cur_pkgver=$(sed -n 's/^pkgver=//p' "$apkb" | head -1)
+cur_pkgrel=$(sed -n 's/^pkgrel=//p' "$apkb" | head -1)
+new_pkgver=${new_client#v}
+# client bump => new version, pkgrel 0; pdo-only bump => same version, pkgrel+1
+if [ "$new_client" != "$cur_client" ]; then new_pkgrel=0; else new_pkgrel=$((cur_pkgrel + 1)); fi
+
+sed -i \
+	-e "s|^\([[:space:]]*pdo_ref[[:space:]]*=[[:space:]]*\"\)[^\"]*\"|\1$new_pdo\"|" \
+	-e "s|^\([[:space:]]*client_tag[[:space:]]*=[[:space:]]*\"\)[^\"]*\"|\1$new_client\"|" "$mf"
+sed -i \
+	-e "s|^pkgver=.*|pkgver=$new_pkgver|" \
+	-e "s|^pkgrel=.*|pkgrel=$new_pkgrel|" \
+	-e "s|^_client_tag=.*|_client_tag=$new_client|" \
+	-e "s|^_pdo_ref=.*|_pdo_ref=$new_pdo|" "$apkb"
+echo "reconcile: wrote pins -> $new_client / $new_disp  (pkgver=$new_pkgver-r$new_pkgrel)"
+
+# Patch-drift check against the NEW client: KEEP/RETIRE are clean; FUZZ means the
+# LLM fix loop is needed before this can go green, so the PR must NOT auto-merge.
+fuzzy=0
+rp=$("$REPO/bin/refresh-patches" "$pkg" 2>&1) || true
+printf '%s\n' "$rp" | sed 's/^/  [patches] /'
+printf '%s\n' "$rp" | grep -q "FUZZ" && fuzzy=1
+autonomy=$(mget autonomy)
+
+[ "$pr" = 1 ] || { echo "(files updated locally; not opening a PR)"; exit 0; }
+
+command -v gh >/dev/null 2>&1 || die "need gh to open a PR"
+start_ref=$(git rev-parse --abbrev-ref HEAD)
+base=${RECONCILE_BASE:-$start_ref}          # PR targets the branch we bumped from
+branch="bump/$pkg-$new_pkgver-$(short "$new_pdo")"
+# Idempotency: if this exact bump branch already exists on the remote, a PR is
+# already open for it — don't recreate it every scheduled run.
+if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+	echo "reconcile: branch '$branch' already on origin (PR likely open) — skipping"
+	git checkout -- "$mf" "$apkb"           # drop the local pin edits
+	exit 0
+fi
+git switch -c "$branch"
+git add "$mf" "$apkb"
+git commit -m "bump($pkg): $cur_client -> $new_client
+
+Coherent pair from the pdo CHANGELOG: client $new_client, pdo $new_disp.
+pkgver $cur_pkgver-r$cur_pkgrel -> $new_pkgver-r$new_pkgrel.
+
+"
+git push -u origin "$branch"
+gh pr create --base "$base" --fill --label auto-bump \
+	|| echo "reconcile: 'gh pr create' failed — push landed on '$branch', open the PR manually"
+# Trust ladder (auto/autonomy.md §3): a graduated package (autonomy=auto) whose
+# bump is CLEAN (no FUZZ patch needing the LLM) may auto-merge once CI is green.
+# Everything else — and every LLM-authored patch — stays held for human review.
+if [ "$autonomy" = auto ] && [ "$fuzzy" = 0 ]; then
+	gh pr merge --auto --squash "$branch" 2>/dev/null \
+		&& echo "reconcile: auto-merge enabled (autonomy=auto, clean bump)" \
+		|| echo "reconcile: could not enable auto-merge (branch protection / checks required)"
+else
+	echo "reconcile: PR held for review (autonomy=$autonomy, fuzz=$fuzzy)"
+fi
+git switch "$start_ref"                     # return to base for the next package

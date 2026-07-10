@@ -1,0 +1,30 @@
+# Manually re-run the LLM build-doctor on a package's last failing build.
+# The normal path is build.yml calling the fix loop automatically on failure;
+# this is for re-running it by hand (e.g. after tweaking the prompt/model).
+# See auto/llm-fix-loop.md.
+name: fix
+on:
+  workflow_dispatch:
+    inputs:
+      package: { type: string, required: true, default: php83-pdo_snowflake }
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    environment: Builder      # OPENAI_API_KEY (+ ABUILD_ACTIVE_KEY) live here
+    env:
+      OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+      OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}
+      FIXLOOP_MODEL:   ${{ vars.FIXLOOP_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reproduce the failure
+        run: ./bin/build-package "${{ inputs.package }}" || true
+      - name: Run the fix loop
+        run: ./bin/fix-loop "${{ inputs.package }}" .build/build.log
+      # On success the candidate patch is in packages/<pkg>/; commit + PR it here
+      # (held for human review — LLM patches never auto-merge until Phase 4).

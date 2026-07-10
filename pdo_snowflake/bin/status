@@ -1,0 +1,35 @@
+#!/bin/sh
+# status [--markdown] — self-report across all packages (auto/autonomy.md §4).
+#
+# A self-maintaining system that's opaque isn't trustworthy. This reads each
+# package's manifest [pins]/[status]/[package] and prints a one-line-per-package
+# summary. --markdown emits a table (for a PR comment / $GITHUB_STEP_SUMMARY /
+# a committed STATUS.md).
+set -eu
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd); cd "$REPO"
+md=0; [ "${1:-}" = "--markdown" ] && md=1
+g() { sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"#]*\)\"\{0,1\}.*/\1/p" "$1" | head -1 | sed 's/[[:space:]]*$//'; }
+# array value: strip [ ] and quotes, collapse to "a,b"
+garr() { sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\[\([^]]*\)\].*/\1/p" "$1" | head -1 | tr -d '" ' ; }
+
+if [ "$md" = 1 ]; then
+	echo "# Package status"; echo
+	echo "| package | autonomy | client | pdo | last result | built | arches |"
+	echo "|---|---|---|---|---|---|---|"
+fi
+any=0
+for mf in packages/*/manifest.toml; do
+	[ -e "$mf" ] || continue
+	any=1
+	name=$(g "$mf" name); auto=$(g "$mf" autonomy)
+	client=$(g "$mf" client_tag); pdo=$(g "$mf" pdo_ref | cut -c1-7)
+	res=$(g "$mf" last_result); built=$(g "$mf" last_built_at); arches=$(garr "$mf" arches)
+	case "$res" in pass) icon="✅";; fail) icon="❌";; needs-human) icon="⚠️";; *) icon="…";; esac
+	if [ "$md" = 1 ]; then
+		echo "| \`$name\` | $auto | $client | \`$pdo\` | $icon $res | ${built:-—} | $arches |"
+	else
+		printf '%s %-24s auto=%-8s %s/%s  built=%s  arches=%s\n' \
+			"$icon" "$name" "$auto" "$client" "$pdo" "${built:-—}" "$arches"
+	fi
+done
+[ "$any" = 1 ] || { echo "status: no packages found" >&2; exit 1; }

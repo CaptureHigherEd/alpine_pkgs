@@ -1,0 +1,15 @@
+diff --git a/include/snowflake/SF_CRTFunctionSafe.h b/include/snowflake/SF_CRTFunctionSafe.h
+index f78ce83..34c1a2b 100644
+--- a/include/snowflake/SF_CRTFunctionSafe.h
++++ b/include/snowflake/SF_CRTFunctionSafe.h
+@@ -344,7 +344,9 @@ extern "C" {
+     {
+ #if defined(_WIN32) || defined(_WIN64)
+         return fopen_s(out_file, in_filename, in_mode) ? (*out_file = NULL) : *out_file;
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) || (defined(__linux__) && !defined(__GLIBC__))
++        // Non-glibc Linux libcs (e.g. musl >= 1.2.4) have a 64-bit off_t
++        // natively and do not provide the legacy LFS64 alias fopen64.
+         return *out_file = fopen(in_filename, in_mode);
+ #else
+         return *out_file = fopen64(in_filename, in_mode);

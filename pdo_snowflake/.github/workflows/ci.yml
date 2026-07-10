@@ -1,0 +1,157 @@
+# CI entrypoint: build + gates on every push / PR. The other workflows are
+# reusable (build.yml, publish.yml), manual (fix.yml), or scheduled
+# (reconcile.yml) — none fire on push, which is why a push triggered nothing.
+# This fans the reusable build.yml over each package in packages/*.
+name: ci
+on:
+  push:
+    branches: [main, development]
+    paths: ['packages/**', 'bin/**', 'llm/**', '.github/workflows/**']
+  pull_request:
+    paths: ['packages/**', 'bin/**', 'llm/**', '.github/workflows/**']
+  workflow_dispatch: {}
+
+# Grant write so the reusable build.yml can push the fix-loop PR branch and the
+# gh-pages publish. A reusable workflow's token is capped by the caller's grant.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Build matrix scoped by branch:
+  #   main            -> FULL: every supported Alpine (3.21-3.24) × x86_64 + aarch64
+  #   development/PR  -> MINIMAL: newest Alpine only, x86_64 only (fast feedback)
+  # Update the version list below as releases EOL / ship (3.20 EOL 2026-04-01).
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        env:
+          FULL: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          pkgs=$(ls -d packages/*/ | xargs -n1 basename)
+          if [ "$FULL" = "true" ]; then
+            alpines="3.21 3.22 3.23 3.24"; runners="ubuntu-latest ubuntu-24.04-arm"
+          else
+            alpines="3.24"; runners="ubuntu-latest"     # newest only, x86_64
+          fi
+          matrix=$(for p in $pkgs; do for a in $alpines; do for r in $runners; do
+            jq -cn --arg p "$p" --arg a "$a" --arg r "$r" '{package:$p,alpine:$a,runner:$r}'
+          done; done; done | jq -sc .)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "matrix ($([ "$FULL" = true ] && echo FULL || echo minimal)): $matrix"
+
+  build:
+    needs: discover
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    uses: ./.github/workflows/build.yml
+    with:
+      package: ${{ matrix.package }}
+      alpine: ${{ matrix.alpine }}
+      runner: ${{ matrix.runner }}
+    secrets: inherit          # ABUILD_ACTIVE_KEY / OPENAI_API_KEY (both optional)
+
+  # End-to-end: run the package's real functional suite against the BUILT apk,
+  # per (alpine, arch). Skips cleanly when creds are absent (so it never blocks a
+  # keyless build); flip the E2E_REQUIRED repo variable to 1 to make it mandatory
+  # once the test account exists. main-only (it precedes publish).
+  e2e:
+    needs: [discover, build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    environment: Builder
+    env:
+      ALPINE_VER: ${{ matrix.alpine }}
+      E2E_REQUIRED: ${{ vars.E2E_REQUIRED }}
+      SNOWFLAKE_TEST_ACCOUNT:   ${{ secrets.SNOWFLAKE_TEST_ACCOUNT }}
+      SNOWFLAKE_TEST_USER:      ${{ secrets.SNOWFLAKE_TEST_USER }}
+      SNOWFLAKE_TEST_DATABASE:  ${{ secrets.SNOWFLAKE_TEST_DATABASE }}
+      SNOWFLAKE_TEST_SCHEMA:    ${{ secrets.SNOWFLAKE_TEST_SCHEMA }}
+      SNOWFLAKE_TEST_WAREHOUSE: ${{ secrets.SNOWFLAKE_TEST_WAREHOUSE }}
+      SNOWFLAKE_TEST_ROLE:      ${{ secrets.SNOWFLAKE_TEST_ROLE }}
+      SNOWFLAKE_TEST_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_TEST_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download built apk (this version × arch)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: apks-${{ matrix.package }}-${{ matrix.alpine }}-*
+          path: dist
+          merge-multiple: true
+      - name: Run e2e against the shipped apk
+        run: |
+          arch=$(uname -m)
+          mkdir -p ".build/packages/packages/$arch"
+          cp dist/"${{ matrix.alpine }}"/"$arch"/*.apk ".build/packages/packages/$arch/"
+          ./bin/e2e "${{ matrix.package }}"
+
+  # Fan-in: combine every version × arch into ONE signed gh-pages publish. Only
+  # on push to main, only with the real key (no insecure fallback), and only
+  # after e2e passes (skips count as pass until creds exist).
+  publish:
+    needs: [build, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: Builder       # ABUILD_ACTIVE_KEY
+    permissions:
+      contents: write          # push gh-pages
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.ABUILD_ACTIVE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require signing key
+        if: env.HAS_SIGNING_KEY != 'true'
+        run: |
+          echo "::error title=Missing signing key::ABUILD_ACTIVE_KEY unavailable to the publish job (Builder environment). Refusing to publish."
+          exit 1
+      - name: Restore signing key
+        run: |
+          mkdir -p .build/keys
+          name=$(basename "$(ls keys/keyring/*.rsa.pub | head -1)" .pub)
+          printf '%s' "${{ secrets.ABUILD_ACTIVE_KEY }}" > ".build/keys/$name"
+          cp "keys/keyring/$name.pub" ".build/keys/$name.pub"
+      - name: Download all apks (every version × arch)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: apks-*
+          path: dist
+          merge-multiple: true      # merges into dist/<alpine>/<arch>/*.apk
+      - name: Publish all versions × arches to gh-pages (one signed push)
+        env:
+          PUBLISH_ORIGIN: https://github.com/${{ github.repository }}.git
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          pkg=$(ls -d packages/*/ | head -1 | xargs basename)
+          vers=$(ls dist)                       # alpine versions present
+          lastver=$(echo "$vers" | tail -1)
+          # Assemble+sign each (version, arch) into site/v<ver>/main/<arch>/ with
+          # BACKEND=local (no push). The very last combo pushes the whole site/
+          # (all versions × arches) to gh-pages in one signed commit.
+          for ver in $vers; do
+            rm -rf .build/packages/packages; mkdir -p .build/packages/packages
+            for archdir in dist/"$ver"/*/; do
+              arch=$(basename "$archdir")
+              mkdir -p ".build/packages/packages/$arch"
+              cp "$archdir"/*.apk ".build/packages/packages/$arch/"
+            done
+            arches=$(ls .build/packages/packages)
+            lastarch=$(echo "$arches" | tail -1)
+            for arch in $arches; do
+              if [ "$ver" = "$lastver" ] && [ "$arch" = "$lastarch" ]; then
+                ALPINE_VER="$ver" BACKEND=pages PUBLISH_PUSH=1 ./bin/publish "$pkg" "$arch"
+              else
+                ALPINE_VER="$ver" BACKEND=local ./bin/publish "$pkg" "$arch"
+              fi
+            done
+          done

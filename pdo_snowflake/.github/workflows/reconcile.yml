@@ -1,0 +1,45 @@
+# Reconcile: scheduled drift detection -> auto-bump PR. Phase 2: real.
+# The reconciliation heartbeat (auto/autonomy.md §1): every night, compare each
+# package's pinned (pdo_ref, client_tag) pair against the coherent upstream pair
+# and open a PR when it moves. The build/gates run on that PR via build.yml.
+#
+# The two-repo ATOMIC pairing is handled by bin/reconcile (our controller), not a
+# Renovate custom datasource — see auto/autonomy.md §2 "The fallback engine".
+name: reconcile
+on:
+  schedule:
+    - cron: "0 3 * * *"        # nightly
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "open PRs (true) or dry-run report only (false)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest      # light job — no build here
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # resolve-pair API + gh pr create
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # reconcile pushes bump branches
+      - name: Detect drift and open bump PRs
+        run: |
+          mode=--pr
+          [ "${{ github.event.inputs.apply }}" = "false" ] && mode=""
+          for m in packages/*/manifest.toml; do
+            pkg=$(basename "$(dirname "$m")")
+            echo "::group::reconcile $pkg"
+            ./bin/reconcile "$pkg" $mode || echo "reconcile $pkg failed (continuing)"
+            git checkout -- . 2>/dev/null || true   # reset any --apply edits between packages
+            echo "::endgroup::"
+          done
+      - name: Status self-report
+        if: always()
+        run: ./bin/status --markdown >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,42 @@
+# Per-package desired state. Renovate/resolve-pair write [pins]; CI writes [status].
+# This file IS the state store — no external database. See auto/repo-structure.md.
+
+[package]
+name        = "php83-pdo_snowflake"
+autonomy    = "propose"          # notify | propose | auto   (see auto/autonomy.md ladder)
+
+[upstream]
+# The pair is resolved together; never bump one side independently.
+pdo_repo        = "snowflakedb/pdo_snowflake"
+pdo_channel     = "master"        # master|tag — master currently leads tags
+client_repo     = "snowflakedb/libsnowflakeclient"
+pair_source     = "changelog"     # how resolve-pair derives client_tag from pdo ref
+
+[pins]                            # written by resolve-pair / Renovate; read by APKBUILD
+pdo_ref     = "50335c9dfe45eb44b04023cbb70042fdf4bb4086"
+client_tag  = "v2.9.1"
+
+[publish]
+retain      = 3                   # keep N newest builds PER ARCH; older .apks pruned
+                                  # before indexing (guards the 1 GB Pages limit;
+                                  # 0 = never prune, for web/s3 backends). See
+                                  # auto/build-pipeline.md §6.
+
+[e2e]
+enabled      = true               # bin/e2e runs packages/<pkg>/e2e/run.sh vs the built apk
+# creds required to actually run (sourced from the Builder environment). If any
+# are absent, e2e SKIPS cleanly — unless E2E_REQUIRED=1 (then it's a publish gate).
+required_env = ["SNOWFLAKE_TEST_ACCOUNT", "SNOWFLAKE_TEST_USER", "SNOWFLAKE_TEST_DATABASE", "SNOWFLAKE_TEST_SCHEMA", "SNOWFLAKE_TEST_WAREHOUSE", "SNOWFLAKE_TEST_ROLE", "SNOWFLAKE_TEST_PRIVATE_KEY"]
+
+[patches]                         # order matters; retire hints let patches self-obsolete
+"001-sf-fopen-no-lfs64-on-musl.patch"                   = { retire_if = "no fopen64 in client src" }
+"002-cmocka-musl-uintptr_t.patch"                       = { retire_if = "vendored cmocka >= 1.1.2" }
+"003-build_arrow-sourced-exit-skips-tomlplusplus.patch" = { upstreamable = true }
+
+[status]                          # written by CI each run — the self-report
+last_built_pair   = "v2.9.1 / 50335c9"
+last_built_at     = "2026-07-07"  # ISO8601, stamped by CI
+last_result       = "pass"        # pass | fail | needs-human
+arches            = ["x86_64", "aarch64"]  # both built in CI (hosted arm64 runner)
+                                  # aarch64 proven in the spike, needs an aarch64
+                                  # runner (hardware/QEMU) to build here

@@ -1,0 +1,49 @@
+#!/bin/sh
+# verify-acceptance <package> [arch] — install the freshly built .apk into a
+# CLEAN alpine:3.22 image and assert the publish gates. This is the end-to-end
+# "apk add-able and loads" proof, stronger than the in-build check() because it
+# uses the packaged artifact in a runtime-only image.
+#
+# Gates (all must pass; any fail => do NOT publish):
+#   1. the .apk installs cleanly (signed; verified against the repo key)
+#   2. php83 -m lists pdo_snowflake AND PDO::getAvailableDrivers() has snowflake
+#   3. readelf audit: zero @GLIBC object code beyond the two weak crt
+#      register_frame_info stubs
+set -eu
+die() { echo "verify-acceptance: $*" >&2; exit 2; }
+
+pkg=${1:-} ; [ -n "$pkg" ] || die "usage: verify-acceptance <package> [arch]"
+arch=${2:-$(uname -m)}
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ALPINE_VER=${ALPINE_VER:-3.22}
+IMAGE=${BUILD_IMAGE:-alpine:$ALPINE_VER}
+REPODEST="$REPO/.build/packages"
+KEYS="$REPO/.build/keys"
+
+apkfile=$(find "$REPODEST" -path "*/$arch/$pkg-[0-9]*.apk" 2>/dev/null | sort | tail -1)
+[ -n "$apkfile" ] || die "no built apk for $pkg/$arch under $REPODEST (run build-package first)"
+echo "verify-acceptance: $apkfile"
+
+command -v docker >/dev/null 2>&1 || die "need docker"
+verify='
+set -eu
+cp /keys/*.rsa.pub /etc/apk/keys/ 2>/dev/null || true
+# php83* live in community; enable it and refresh the index.
+printf "%s\n%s\n" "https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_VER/main" \
+	"https://dl-cdn.alpinelinux.org/alpine/v$ALPINE_VER/community" > /etc/apk/repositories
+apk update >/dev/null
+apk add --no-cache php83 php83-pdo binutils >/dev/null
+# 1) install the packaged apk (signed; key trusted above)
+apk add --no-cache /artifact/$(basename "$1")
+# 2) load + driver registration
+php83 -m | grep -qx pdo_snowflake
+php83 -r "exit(in_array(\"snowflake\", PDO::getAvailableDrivers()) ? 0 : 1);"
+# 3) zero glibc object code beyond the weak crt frame-info stubs
+so=/usr/lib/php83/modules/pdo_snowflake.so
+readelf --wide --dyn-syms "$so" | grep "@GLIBC" | grep -cv register_frame_info | grep -qx 0
+echo "ACCEPTANCE PASS: $(php83 -r "echo PHP_VERSION;") loads pdo_snowflake, zero glibc object code"
+'
+exec docker run --rm --user 0 -e ALPINE_VER="$ALPINE_VER" \
+	-v "$(dirname "$apkfile")":/artifact:ro \
+	-v "$KEYS":/keys:ro \
+	"$IMAGE" sh -euc "$verify" _ "$apkfile"

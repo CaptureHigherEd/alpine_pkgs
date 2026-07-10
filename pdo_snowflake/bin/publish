@@ -1,0 +1,101 @@
+#!/bin/sh
+# publish <package> [arch] — keyring-signed publish of the built apk(s) into the
+# site/ tree (auto/build-pipeline.md §6). Phase 1 implements the LOCAL site tree
+# (prune -> index -> sign -> keyring); pushing that tree to a backend (gh-pages on
+# apk.<domain>, forgejo, web/s3) is the remaining wiring, marked TODO below.
+#
+# Steps (all run as container-root so signing/index tooling + perms are clean):
+#   1. place the built .apk under site/<ver>/<repo>/<arch>/
+#   2. PRUNE to [publish].retain newest per (package,arch)  -- BEFORE indexing
+#   3. apk index -o APKINDEX.tar.gz *.apk
+#   4. abuild-sign -k <ACTIVE private key> APKINDEX.tar.gz
+#   5. refresh the published keyring (all currently-valid public keys)
+set -eu
+die() { echo "publish: $*" >&2; exit 2; }
+
+pkg=${1:-} ; [ -n "$pkg" ] || die "usage: publish <package> [arch]"
+arch=${2:-$(uname -m)}
+REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+IMAGE=${BUILD_IMAGE:-alpine:3.22}
+ALPINE_VER=${ALPINE_VER:-3.22}
+PUBLISH_REPO=${PUBLISH_REPO:-main}
+BACKEND=${BACKEND:-local}
+
+# retain from manifest [publish].retain (default 3)
+mf="$REPO/packages/$pkg/manifest.toml"
+retain=$(sed -n 's/^[[:space:]]*retain[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$mf" 2>/dev/null | head -1)
+[ -n "$retain" ] || retain=3
+
+command -v docker >/dev/null 2>&1 || die "need docker"
+[ -d "$REPO/.build/keys" ] || die "no signing key in .build/keys (run build-package first)"
+
+echo "publish: $pkg/$arch -> site/v$ALPINE_VER/$PUBLISH_REPO/$arch (retain=$retain, backend=$BACKEND)"
+
+pub='
+set -eu
+apk add --no-cache alpine-sdk >/dev/null
+cp /keys/*.rsa.pub /etc/apk/keys/   # trust our own signed apks when indexing
+priv=$(ls /keys/*.rsa | grep -v "\.pub$" | head -1)
+[ -n "$priv" ] || { echo "publish: no private key in /keys" >&2; exit 2; }
+
+src="/repo/.build/packages"
+dest="/repo/site/v$ALPINE_VER/$PUBLISH_REPO/$arch"
+mkdir -p "$dest" "/repo/site/keyring" "/repo/keys/keyring"
+
+# 1) place freshly built apks for this arch
+found=$(find "$src" -path "*/$arch/*.apk" 2>/dev/null || true)
+[ -n "$found" ] || { echo "publish: no built apks for $arch under $src" >&2; exit 2; }
+for a in $found; do cp -v "$a" "$dest/"; done
+
+# 2) prune: keep the $retain newest per package name (name-*.apk), older removed
+for base in $(ls "$dest"/*.apk 2>/dev/null | sed -E "s|.*/||; s/-[0-9].*//" | sort -u); do
+	n=0
+	for f in $(ls -1t "$dest/$base"-*.apk 2>/dev/null); do
+		n=$((n+1)); [ "$n" -le "$retain" ] && continue
+		echo "prune: $f"; rm -f "$f"
+	done
+done
+
+# 3) index  4) sign
+cd "$dest"
+apk index -o APKINDEX.tar.gz *.apk
+abuild-sign -k "$priv" APKINDEX.tar.gz
+
+# 5) refresh the PUBLISHED keyring (servable copy under site/). The canonical
+# keys/keyring/ is human-curated (the production ACTIVE key), not written here.
+cp /keys/*.rsa.pub /repo/site/keyring/
+echo "== published =="; ls -la "$dest"
+'
+docker run --rm --user 0 \
+	-e ALPINE_VER="$ALPINE_VER" -e PUBLISH_REPO="$PUBLISH_REPO" -e arch="$arch" -e retain="$retain" \
+	-v "$REPO":/repo -v "$REPO/.build/keys":/keys:ro \
+	"$IMAGE" sh -euc "$pub"
+
+case "$BACKEND" in
+	local) echo "publish: site tree ready at $REPO/site/v$ALPINE_VER/$PUBLISH_REPO/$arch" ;;
+	pages)
+		# Publish site/ to the gh-pages branch (served at apk.<domain> via CNAME).
+		# Runs in a container so it can read the subuid-owned site/ files. The
+		# actual push is gated on PUBLISH_PUSH=1 + GITHUB_TOKEN (CI); otherwise it
+		# prepares the commit and stops. APK_DOMAIN sets the CNAME.
+		docker run --rm --user 0 \
+			-e TOK="${GITHUB_TOKEN:-}" -e CNAME="${APK_DOMAIN:-}" \
+			-e PUSH="${PUBLISH_PUSH:-0}" -e ORIGIN="${PUBLISH_ORIGIN:-}" \
+			-v "$REPO":/repo "$IMAGE" sh -euc '
+				apk add --no-cache git >/dev/null
+				[ -n "$CNAME" ] && echo "$CNAME" > /repo/site/CNAME || true
+				rm -rf /tmp/ghp && mkdir /tmp/ghp && cp -a /repo/site/. /tmp/ghp/
+				cd /tmp/ghp && git init -q -b gh-pages
+				git -c user.email=ci@pdosnowalpine -c user.name=ci add -A
+				git -c user.email=ci@pdosnowalpine -c user.name=ci commit -qm "publish apk repo"
+				if [ "$PUSH" = 1 ] && [ -n "$TOK" ] && [ -n "$ORIGIN" ]; then
+					url=$(printf %s "$ORIGIN" | sed "s#https://#https://x-access-token:$TOK@#")
+					git push -f "$url" gh-pages:gh-pages && echo "publish: pushed gh-pages"
+				else
+					echo "publish: prepared gh-pages commit (set PUBLISH_PUSH=1 + GITHUB_TOKEN + PUBLISH_ORIGIN=https://... to push)"
+				fi'
+		;;
+	forgejo|web|s3)
+		echo "publish: TODO push site/ to backend '$BACKEND' (registry / rsync / object store)" >&2 ;;
+	*) die "unknown backend: $BACKEND" ;;
+esac

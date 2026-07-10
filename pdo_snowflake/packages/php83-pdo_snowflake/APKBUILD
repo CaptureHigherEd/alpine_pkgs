@@ -1,0 +1,164 @@
+# Maintainer: James MacLachlan <jmaclachlan@zemlyaozer.com>
+#
+# Built ENTIRELY from source on Alpine/musl (driver + libsnowflakeclient + its
+# full dep tree). Transcribed from the proven snowflake/ Option-3 spike
+# (snowflake/OPTION3_REPORT.md: GO-WITH-CAVEATS, 3 patches, zero glibc object
+# code in the final .so). See packages/php83-pdo_snowflake/README.md.
+#
+pkgname=php83-pdo_snowflake
+# pkgver tracks the libsnowflakeclient release; _pdo_ref is the PAIRED pdo commit.
+# NEVER bump one side of the pair independently — see the package README and
+# bin/resolve-pair. (pdo master ↔ client 2.9.1; pdo tag v4.0.0 ↔ client 2.8.0.)
+pkgver=2.9.1
+_client_tag=v2.9.1
+_pdo_ref=50335c9dfe45eb44b04023cbb70042fdf4bb4086
+pkgrel=0
+pkgdesc="PDO driver for Snowflake, built from source on musl (unsupported by upstream)"
+url="https://github.com/snowflakedb/pdo_snowflake"
+arch="x86_64 aarch64"          # spike proved aarch64; x86_64 is the confirming build
+license="Apache-2.0"
+depends="php83 php83-pdo libstdc++ libgcc"
+makedepends="bash git build-base cmake make perl linux-headers python3 curl
+             coreutils autoconf php83-dev"
+checkdepends="php83 php83-pdo"  # check() needs the PHP runtime + PDO to load the .so
+subpackages="libsnowflakeclient-static:_client_static
+             libsnowflakeclient-dev:_client_dev"
+# The main sources (client + pdo) are git-cloned in prepare() — mirroring the
+# proven Dockerfile — because (a) pdo's ~1.2 GB of vendored prebuilt glibc
+# archives must be sparse-EXCLUDED, and (b) the upstream build scripts expect git
+# trees. Only local files carry checksums here.
+source="60_pdo_snowflake.ini
+        001-sf-fopen-no-lfs64-on-musl.patch
+        002-cmocka-musl-uintptr_t.patch
+        003-build_arrow-sourced-exit-skips-tomlplusplus.patch"
+options="net"                  # dep builds + source clones fetch over the network
+builddir="$srcdir/sfclient"
+
+# 14 dependency archives + 2 header roots the upstream scripts must have produced.
+# The scripts return 0 even when a sub-build dies, so this hard-assert is the real
+# "all deps built" gate. Keep in sync with build_dependencies.sh output layout.
+_dep_artifacts="
+uuid/lib/libuuid.a openssl/lib/libcrypto.a openssl/lib/libssl.a
+zlib/lib/libz.a oob/lib/libtelemetry.a curl/lib/libcurl.a
+aws/lib64/libaws-cpp-sdk-core.a aws/lib64/libs2n.a
+azure/lib/libazure-storage-lite.a cmocka/lib/libcmocka.a
+arrow/lib64/libarrow.a arrow_deps/lib/libjemalloc_pic.a
+boost/lib/libboost_regex.a boost/lib/libboost_url.a
+tomlplusplus/include/toml++/toml.hpp picojson/include/picojson.h
+"
+
+_assert_dep_artifacts() {
+	local d="$builddir/deps-build/linux/Release" a
+	for a in $_dep_artifacts; do
+		[ -f "$d/$a" ] || { error "MISSING DEP ARTIFACT: $a"; return 1; }
+	done
+	msg "all dependency archives present"
+}
+
+_assemble_vendored_layout() {
+	# Rebuild the vendored layout pdo_snowflake expects, from OUR musl artifacts,
+	# normalizing the aws lib64 / arrow lib symlink drift. arch_dir="" on x86_64.
+	local arch_dir="" dep="$builddir/deps-build/linux/Release" v="$srcdir/pdo/libsnowflakeclient" d
+	[ "$(uname -m)" = "aarch64" ] && arch_dir=aarch64
+	mkdir -p "$v/lib/linux/$arch_dir" "$v/deps-build/linux/$arch_dir"
+	cp "$dep/libsnowflakeclient/lib/libsnowflakeclient.a" "$v/lib/linux/$arch_dir/"
+	cp -r "$builddir/include" "$v/include"
+	for d in openssl curl oob aws azure uuid arrow arrow_deps boost zlib; do
+		cp -r "$dep/$d" "$v/deps-build/linux/$arch_dir/$d"
+	done
+	[ -e "$v/deps-build/linux/$arch_dir/aws/lib64" ] || \
+		ln -s lib "$v/deps-build/linux/$arch_dir/aws/lib64"
+	[ -e "$v/deps-build/linux/$arch_dir/arrow/lib" ] || \
+		ln -s lib64 "$v/deps-build/linux/$arch_dir/arrow/lib"
+}
+
+prepare() {
+	# Client: full source at the pinned tag, patched (001-003).
+	rm -rf "$builddir"
+	git clone --depth 1 --branch "$_client_tag" \
+		https://github.com/snowflakedb/libsnowflakeclient "$builddir"
+	local p
+	for p in "$srcdir"/[0-9]*.patch; do
+		msg "applying ${p##*/}"
+		git -C "$builddir" apply --verbose "$p"
+	done
+	# PHP glue: sparse checkout WITHOUT the ~1.2 GB of vendored prebuilt glibc
+	# archives under libsnowflakeclient/ — those must never enter this build.
+	rm -rf "$srcdir/pdo"
+	git clone --filter=blob:none --no-checkout \
+		https://github.com/snowflakedb/pdo_snowflake "$srcdir/pdo"
+	git -C "$srcdir/pdo" sparse-checkout set --no-cone '/*' '!/libsnowflakeclient'
+	git -C "$srcdir/pdo" checkout "$_pdo_ref"
+}
+
+build() {
+	cd "$builddir"
+	# The vendored upstream build scripts manage their own compiler flags and are
+	# NOT compatible with Alpine's injected hardening CFLAGS/CXXFLAGS: e.g. the
+	# azure-storage-cpplite script appends "-Wno-error=deprecated-declarations"
+	# onto $CXXFLAGS with no separating space, mangling Alpine's trailing -fno-plt
+	# into "-fno-plt-Wno-error=..." (an invalid flag) and failing the build. Build
+	# with vanilla flags, exactly like the proven Dockerfile spike. (Re-hardening
+	# these old vendored deps is a Phase 4 concern.)
+	unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FFLAGS FCFLAGS
+	export MAKEFLAGS=-j$(nproc)
+	# Documented upstream flow; ARROW_FROM_SOURCE=1 is the default in _init.sh.
+	bash scripts/build_dependencies.sh -t Release
+	_assert_dep_artifacts
+	bash scripts/build_libsnowflakeclient.sh -t Release
+	_assemble_vendored_layout
+	cd "$srcdir/pdo"
+	PHP_HOME=/usr bash scripts/build_pdo_snowflake.sh
+}
+
+check() {
+	# Gate 1: credential-free unit suite (excludes documented infra/creds tests).
+	# -j1 (serial) is REQUIRED: the upstream build scripts leak a ctest parallel
+	# level into the env, and several logger tests race on a shared ./logs/ dir
+	# (test_null_log_path asserts the log file is absent while a concurrent test
+	# creates it). Serial execution matches the proven spike's 35/35.
+	cd "$builddir/cmake-build-Release"
+	SNOWFLAKE_TEST_CA_BUNDLE_FILE="$builddir/cacert.pem" \
+		ctest -j1 -R unit -E "$(cat "$startdir"/acceptance/ctest-exclude.txt)" \
+			--timeout 120 --output-on-failure
+	# Gate 2 + 3: extension loads on musl PHP, registers the driver, and carries
+	# ZERO glibc object code beyond the two standard weak crt frame-info stubs.
+	install -Dm644 "$srcdir/pdo/.libs/pdo_snowflake.so" \
+		/usr/lib/php83/modules/pdo_snowflake.so
+	echo "extension=pdo_snowflake.so" > /etc/php83/conf.d/60_pdo_snowflake.ini
+	php83 -m | grep -qx pdo_snowflake
+	php83 -r 'exit(in_array("snowflake", PDO::getAvailableDrivers()) ? 0 : 1);'
+	readelf --wide --dyn-syms /usr/lib/php83/modules/pdo_snowflake.so \
+		| grep "@GLIBC" | grep -cv register_frame_info | grep -qx 0
+}
+
+package() {
+	install -Dm644 "$srcdir/pdo/.libs/pdo_snowflake.so" \
+		"$pkgdir/usr/lib/php83/modules/pdo_snowflake.so"
+	install -Dm644 "$srcdir/60_pdo_snowflake.ini" \
+		"$pkgdir/etc/php83/conf.d/60_pdo_snowflake.ini"
+	install -Dm644 "$builddir/cacert.pem" "$pkgdir/etc/snowflake/cacert.pem"
+}
+
+_client_static() {
+	pkgdesc="Snowflake C client static library (musl build)"
+	depends=""
+	install -Dm644 \
+		"$builddir"/deps-build/linux/Release/libsnowflakeclient/lib/libsnowflakeclient.a \
+		"$subpkgdir/usr/lib/libsnowflakeclient.a"
+}
+
+_client_dev() {
+	pkgdesc="Snowflake C client headers (musl build)"
+	depends="libsnowflakeclient-static"
+	mkdir -p "$subpkgdir/usr/include"
+	cp -r "$builddir/include/"* "$subpkgdir/usr/include/"
+}
+
+# `abuild checksum` fills these (local source files only).
+sha512sums="
+ece7ce7862b5428375eeaec9c0d50508b730db8cf9893cdbdccdbf6e377dc91a3ee9f9ef1f8e799620c7f3701f73b3355f69c816f0f54ef63822d143d19a8872  60_pdo_snowflake.ini
+4387057c122866416bc02c80c679e579c3c7e501cfea201f6471f81a9eb379ec34580019a2b26ad06e7c4a430a6b6f95d315b9cb59a60e98d434b661f7d6cdfd  001-sf-fopen-no-lfs64-on-musl.patch
+ae6d1f80d62ef65b2e7cbcd0295826d75fd0b413ef72357d018159be17895d155bfe864c9bec04ae0e0ffd06212bab52cda65d77201dc22be84db2aa4f6e4be3  002-cmocka-musl-uintptr_t.patch
+e8a41aaae48fa195862f70d282c00536385c7d8e6cf207393d21542cc466e992a5507f0797a663045cf0a9704240c5c10c3778f5d7d4beb8ecff8c5427410031  003-build_arrow-sourced-exit-skips-tomlplusplus.patch
+"

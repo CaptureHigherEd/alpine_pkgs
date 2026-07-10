@@ -1,0 +1,52 @@
+#!/bin/sh
+# classify-error <build-log> — deterministic musl build-failure classifier.
+#
+# Reads a build log and prints a JSON classification of the FIRST genuine
+# failure, matching the musl taxonomy in llm/prompts/musl-fix.md. Used by
+# bin/fix-loop to pick the error class, seed the prompt, and (for known classes)
+# tell the model exactly which canonical fix applies.
+#
+# Output: {"class":"...","symbol":"...","file":"...","line":"...","evidence":"..."}
+#   class ∈ lfs64 | gnu-header | cdefs | fortify | execinfo | ucontext |
+#           wordsize-typedef | build-script | unknown
+set -eu
+die() { echo "classify-error: $*" >&2; exit 2; }
+log=${1:-} ; [ -n "$log" ] && [ -f "$log" ] || die "usage: classify-error <build-log>"
+command -v jq >/dev/null 2>&1 || die "need jq"
+
+# First matching evidence line for a pattern (case-insensitive extended regex).
+first() { grep -m1 -iE "$1" "$log" 2>/dev/null || true; }
+
+class=unknown symbol="" file="" line="" ev=""
+
+# Order matters: most-specific / earliest-failing first.
+if ev=$(first "implicit declaration of function '(fopen64|open64|openat64|lseek64|pread64|readdir64|fcntl64|ftruncate64|truncate64|statvfs64|fstatfs64|posix_fadvise64|sendfile64)'|'(fopen64|open64|lseek64|stat64)' was not declared|__(x|f|l)stat64|LFS64"); [ -n "$ev" ]; then
+	class=lfs64
+	symbol=$(printf '%s' "$ev" | grep -oiE '(fopen64|open64|openat64|lseek64|pread64|readdir64|fcntl64|ftruncate64|truncate64|statvfs64|fstatfs64|posix_fadvise64|sendfile64|__xstat64|__fxstat64|__lxstat64|stat64)' | head -1)
+elif ev=$(first "fatal error: error\.h: No such file|error\.h: No such file"); [ -n "$ev" ]; then
+	class=gnu-header; file=error.h
+elif ev=$(first "sys/cdefs\.h: No such file|__BEGIN_DECLS|__END_DECLS"); [ -n "$ev" ]; then
+	class=cdefs; file=sys/cdefs.h
+elif ev=$(first "undefined reference to '__(printf|fprintf|vsnprintf|snprintf|memcpy|strcpy|sprintf)_chk'|_FORTIFY_SOURCE"); [ -n "$ev" ]; then
+	class=fortify; symbol=$(printf '%s' "$ev" | grep -oE '__[a-z]+_chk' | head -1)
+elif ev=$(first "execinfo\.h: No such file|undefined reference to 'backtrace(_symbols)?'"); [ -n "$ev" ]; then
+	class=execinfo; symbol=backtrace
+elif ev=$(first "undefined reference to '(get|set|make)context'|ucontext\.h: No such file"); [ -n "$ev" ]; then
+	class=ucontext
+elif ev=$(first "conflicting types for '?uintptr_t|redefinition of typedef 'uintptr_t'|__WORDSIZE"); [ -n "$ev" ]; then
+	class=wordsize-typedef; symbol=uintptr_t
+elif ev=$(first "MISSING DEP ARTIFACT|cp: can not stat|cp: cannot stat|No such file or directory.*\.a'"); [ -n "$ev" ]; then
+	class=build-script
+fi
+
+# Best-effort file:line from a "path:line: error:" or "path:line:col: error" line.
+floc=$(grep -m1 -iE '[^ ]+:[0-9]+:([0-9]+:)? *(error|fatal error)' "$log" 2>/dev/null || true)
+if [ -n "$floc" ]; then
+	fl=$(printf '%s' "$floc" | grep -oE '[^ ]+\.(h|hpp|c|cc|cpp|cxx):[0-9]+' | head -1)
+	[ -n "$fl" ] && { file=${file:-${fl%:*}}; line=${fl##*:}; }
+	[ -z "$ev" ] && ev=$floc
+fi
+
+jq -cn --arg c "$class" --arg s "$symbol" --arg f "$file" --arg l "$line" \
+	--arg e "$(printf '%s' "$ev" | sed 's/^[[:space:]]*//' | cut -c1-300)" \
+	'{class:$c, symbol:$s, file:$f, line:$l, evidence:$e}'

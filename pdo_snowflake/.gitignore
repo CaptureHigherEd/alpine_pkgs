@@ -1,0 +1,29 @@
+# Secrets / local config — NEVER commit
+# (public keys live in keys/keyring/ and are tracked; private keys never)
+llm/model.env
+.env
+*.rsa
+
+# Build artifacts
+*.apk
+build/
+cmake-build-*/
+# local build outputs + throwaway signing keys
+.build/
+# served from the gh-pages branch, not main
+site/
+# downloaded CI run logs / scratch
+tmp/
+
+# abuild working dirs
+packages/*/src/
+packages/*/pkg/
+
+# Fetched upstream sources (re-fetched at build time; never committed)
+srcdir/
+libsnowflakeclient-*/
+pdo/
+
+# OS / editor
+.DS_Store
+*.swp
