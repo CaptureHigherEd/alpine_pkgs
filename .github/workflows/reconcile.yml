@@ -5,6 +5,7 @@
 #
 # The two-repo ATOMIC pairing is handled by bin/reconcile (our controller), not a
 # Renovate custom datasource — see auto/autonomy.md §2 "The fallback engine".
+# Runs inside the project subdir (`dir`).
 name: reconcile
 on:
   schedule:
@@ -23,6 +24,9 @@ permissions:
 jobs:
   reconcile:
     runs-on: ubuntu-latest      # light job — no build here
+    defaults:
+      run:
+        working-directory: pdo_snowflake
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # resolve-pair API + gh pr create
     steps:

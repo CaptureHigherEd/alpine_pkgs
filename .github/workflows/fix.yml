@@ -1,11 +1,12 @@
 # Manually re-run the LLM build-doctor on a package's last failing build.
-# The normal path is build.yml calling the fix loop automatically on failure;
-# this is for re-running it by hand (e.g. after tweaking the prompt/model).
-# See auto/llm-fix-loop.md.
+# The normal path is pdo_snowflake-ci.yml calling the fix loop automatically on
+# failure; this is for re-running it by hand (e.g. after tweaking the prompt/model).
+# See auto/llm-fix-loop.md. Runs inside the project subdir (`dir`).
 name: fix
 on:
   workflow_dispatch:
     inputs:
+      dir:     { type: string, required: false, default: pdo_snowflake }
       package: { type: string, required: true, default: php83-pdo_snowflake }
 
 permissions:
@@ -16,6 +17,9 @@ jobs:
   fix:
     runs-on: ubuntu-latest
     environment: Builder      # OPENAI_API_KEY (+ ABUILD_ACTIVE_KEY) live here
+    defaults:
+      run:
+        working-directory: ${{ inputs.dir }}
     env:
       OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
       OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}

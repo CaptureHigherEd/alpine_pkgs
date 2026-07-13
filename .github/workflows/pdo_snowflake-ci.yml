@@ -1,18 +1,27 @@
-# CI entrypoint: build + gates on every push / PR. The other workflows are
-# reusable (build.yml, publish.yml), manual (fix.yml), or scheduled
-# (reconcile.yml) — none fire on push, which is why a push triggered nothing.
-# This fans the reusable build.yml over each package in packages/*.
-name: ci
+# CI entrypoint for the pdo_snowflake package project (monorepo layout).
+# GitHub Actions only registers workflows in .github/workflows/ at the REPO ROOT,
+# so this lives here and operates on the pdo_snowflake/ subdirectory (paths +
+# working-directory scope it). One such entrypoint per package project; it fans
+# the reusable build.yml over each package in pdo_snowflake/packages/*.
+name: pdo_snowflake
 on:
   push:
     branches: [main, development]
-    paths: ['packages/**', 'bin/**', 'llm/**', '.github/workflows/**']
+    paths:
+      - 'pdo_snowflake/packages/**'
+      - 'pdo_snowflake/bin/**'
+      - 'pdo_snowflake/llm/**'
+      - '.github/workflows/**'
   pull_request:
-    paths: ['packages/**', 'bin/**', 'llm/**', '.github/workflows/**']
+    paths:
+      - 'pdo_snowflake/packages/**'
+      - 'pdo_snowflake/bin/**'
+      - 'pdo_snowflake/llm/**'
+      - '.github/workflows/**'
   workflow_dispatch: {}
 
-# Grant write so the reusable build.yml can push the fix-loop PR branch and the
-# gh-pages publish. A reusable workflow's token is capped by the caller's grant.
+# Grant write so the reusable build.yml can push the fix-loop PR branch. A
+# reusable workflow's token is capped by the caller's grant.
 permissions:
   contents: write
   pull-requests: write
@@ -24,6 +33,9 @@ jobs:
   # Update the version list below as releases EOL / ship (3.20 EOL 2026-04-01).
   discover:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pdo_snowflake
     outputs:
       matrix: ${{ steps.m.outputs.matrix }}
     steps:
@@ -52,6 +64,7 @@ jobs:
         include: ${{ fromJson(needs.discover.outputs.matrix) }}
     uses: ./.github/workflows/build.yml
     with:
+      dir: pdo_snowflake
       package: ${{ matrix.package }}
       alpine: ${{ matrix.alpine }}
       runner: ${{ matrix.runner }}
@@ -70,6 +83,9 @@ jobs:
         include: ${{ fromJson(needs.discover.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     environment: Builder
+    defaults:
+      run:
+        working-directory: pdo_snowflake
     env:
       ALPINE_VER: ${{ matrix.alpine }}
       E2E_REQUIRED: ${{ vars.E2E_REQUIRED }}
@@ -86,7 +102,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: apks-${{ matrix.package }}-${{ matrix.alpine }}-*
-          path: dist
+          path: pdo_snowflake/dist    # relative to repo root, not working-directory
           merge-multiple: true
       - name: Run e2e against the shipped apk
         run: |
@@ -95,8 +111,8 @@ jobs:
           cp dist/"${{ matrix.alpine }}"/"$arch"/*.apk ".build/packages/packages/$arch/"
           ./bin/e2e "${{ matrix.package }}"
 
-  # Fan-in: combine every version × arch into ONE signed gh-pages publish. Only
-  # on push to main, only with the real key (no insecure fallback), and only
+  # Fan-in: combine every version × arch into ONE signed publish to S3/CloudFront.
+  # Only on push to main, only with the real key (no insecure fallback), and only
   # after e2e passes (skips count as pass until creds exist).
   publish:
     needs: [build, e2e]
@@ -105,6 +121,9 @@ jobs:
     environment: Builder       # ABUILD_ACTIVE_KEY + AWS_MAIN_MMEDIA_* creds
     permissions:
       contents: read           # publish writes to S3/CloudFront, not git
+    defaults:
+      run:
+        working-directory: pdo_snowflake
     env:
       HAS_SIGNING_KEY: ${{ secrets.ABUILD_ACTIVE_KEY != '' }}
     steps:
@@ -124,8 +143,8 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: apks-*
-          path: dist
-          merge-multiple: true      # merges into dist/<alpine>/<arch>/*.apk
+          path: pdo_snowflake/dist    # relative to repo root, not working-directory
+          merge-multiple: true        # merges into dist/<alpine>/<arch>/*.apk
       - name: Assemble + sign every version × arch, then sync to S3/CloudFront
         env:
           AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_MAIN_MMEDIA_ACCESS_KEY }}
@@ -152,6 +171,6 @@ jobs:
             done
           done
           # One signed upload of the whole site/ tree (every version × arch) to the
-          # shared S3 bucket behind CloudFront. BACKEND=s3 syncs $REPO/site/ in full.
+          # shared S3 bucket behind CloudFront. BACKEND=s3 syncs site/ in full.
           lastarch=$(ls .build/packages/packages | tail -1)
           ALPINE_VER="$lastver" BACKEND=s3 ./bin/publish "$pkg" "$lastarch"

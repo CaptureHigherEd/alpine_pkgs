@@ -1,9 +1,12 @@
 # Build one package + gates, with the LLM build-doctor on the failure path.
-# Runs on ubuntu-latest: bin/build-package spins its own alpine:3.22 container.
+# Reusable across package projects in the monorepo: `dir` is the project subdir
+# (e.g. pdo_snowflake) that all run steps execute inside. Runs on ubuntu-latest:
+# bin/build-package spins its own alpine container.
 name: build
 on:
   workflow_call:
     inputs:
+      dir:     { type: string, required: false, default: pdo_snowflake }
       package: { type: string, required: true, default: php83-pdo_snowflake }
       runner:  { type: string, required: false, default: ubuntu-latest }
       alpine:  { type: string, required: false, default: "3.22" }
@@ -11,6 +14,7 @@ on:
     # `environment:` below), not from the caller — so they are NOT declared here.
   workflow_dispatch:
     inputs:
+      dir:     { type: string, required: false, default: pdo_snowflake }
       package: { type: string, required: true, default: php83-pdo_snowflake }
       runner:  { type: string, required: false, default: ubuntu-latest }
       alpine:  { type: string, required: false, default: "3.22" }
@@ -24,8 +28,11 @@ jobs:
     # rules) so main + development builds both run without pausing for approval.
     environment: Builder
     permissions:
-      contents: write         # fix-loop PR branch + gh-pages publish push
+      contents: write         # fix-loop PR branch push
       pull-requests: write    # fix-loop review PR
+    defaults:
+      run:
+        working-directory: ${{ inputs.dir }}   # all run steps execute in the project subdir
     env:
       # Swappable SaaS model for the fix-loop (auto/llm-fix-loop.md). If the key
       # is absent the loop is skipped and the failure escalates as needs-human.
@@ -96,7 +103,7 @@ jobs:
         if: steps.build.outcome == 'success' || steps.fix.outcome == 'success'
         run: ./bin/verify-acceptance "${{ inputs.package }}"
       # Stage this runner's arch apks and upload as an arch-named artifact; the
-      # ci `publish` job fans these in and pushes a single multi-arch gh-pages.
+      # ci `publish` job fans these in and pushes a single multi-arch publish.
       - name: Stage apks by version + arch
         id: stage
         if: steps.build.outcome == 'success' || steps.fix.outcome == 'success'
@@ -111,5 +118,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: apks-${{ inputs.package }}-${{ inputs.alpine }}-${{ steps.stage.outputs.arch }}
-          path: dist/
+          path: ${{ inputs.dir }}/dist/    # relative to repo root, not working-directory
           if-no-files-found: error

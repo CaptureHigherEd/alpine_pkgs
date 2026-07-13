@@ -1,23 +1,27 @@
-# Sign + publish the APKINDEX after gates pass. Phase 1: builds the signed site/
-# tree locally; pushing it to the gh-pages backend at apk.<domain> is the
-# remaining wiring (marked TODO in bin/publish).
+# Sign + publish the APKINDEX to S3/CloudFront after gates pass. Reusable across
+# package projects: `dir` is the project subdir all run steps execute inside.
 name: publish
 on:
   workflow_call:
     inputs:
+      dir:     { type: string, required: false, default: pdo_snowflake }
       package: { type: string, required: true }
     # ABUILD_ACTIVE_KEY comes from the `Builder` environment (job below), not the caller.
   workflow_dispatch:
     inputs:
+      dir:     { type: string, required: false, default: pdo_snowflake }
       package: { type: string, required: true, default: php83-pdo_snowflake }
 
 permissions:
-  contents: write               # to push the gh-pages/site branch (TODO)
+  contents: read                # publish writes to S3/CloudFront, not git
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: Builder      # ABUILD_ACTIVE_KEY lives here
+    environment: Builder      # ABUILD_ACTIVE_KEY + AWS_MAIN_MMEDIA_* creds live here
+    defaults:
+      run:
+        working-directory: ${{ inputs.dir }}
     steps:
       - uses: actions/checkout@v4
       # NB: publish must run against apks + the ACTIVE key produced by build.yml.
