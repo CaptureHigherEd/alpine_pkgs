@@ -9,7 +9,7 @@
 agent:
   system_template_file: prompts/musl-fix.md
   step_limit: 30                # per attempt; the outer <=3-attempt cap is bin/fix-loop
-  cost_limit: 2.00              # USD; also enforced by FIXLOOP_MAX_SPEND_USD
+  cost_limit: 5.00              # USD; also enforced by FIXLOOP_MAX_SPEND_USD
 
 model:
   # from env: OPENAI_BASE_URL / OPENAI_API_KEY / FIXLOOP_MODEL

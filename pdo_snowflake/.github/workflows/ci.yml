@@ -102,9 +102,9 @@ jobs:
     needs: [build, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: Builder       # ABUILD_ACTIVE_KEY
+    environment: Builder       # ABUILD_ACTIVE_KEY + AWS_MAIN_MMEDIA_* creds
     permissions:
-      contents: write          # push gh-pages
+      contents: read           # publish writes to S3/CloudFront, not git
     env:
       HAS_SIGNING_KEY: ${{ secrets.ABUILD_ACTIVE_KEY != '' }}
     steps:
@@ -126,18 +126,20 @@ jobs:
           pattern: apks-*
           path: dist
           merge-multiple: true      # merges into dist/<alpine>/<arch>/*.apk
-      - name: Publish all versions × arches to gh-pages (one signed push)
+      - name: Assemble + sign every version × arch, then sync to S3/CloudFront
         env:
-          PUBLISH_ORIGIN: https://github.com/${{ github.repository }}.git
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_MAIN_MMEDIA_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_MAIN_MMEDIA_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    ${{ vars.AWS_MMEDIA_REGION }}
+          PUBLISH_S3_TARGET:     ${{ vars.PUBLISH_S3_TARGET }}
         run: |
           set -eu
           pkg=$(ls -d packages/*/ | head -1 | xargs basename)
           vers=$(ls dist)                       # alpine versions present
           lastver=$(echo "$vers" | tail -1)
           # Assemble+sign each (version, arch) into site/v<ver>/main/<arch>/ with
-          # BACKEND=local (no push). The very last combo pushes the whole site/
-          # (all versions × arches) to gh-pages in one signed commit.
+          # BACKEND=local (no upload) to build the full multi-arch, multi-version
+          # tree under site/.
           for ver in $vers; do
             rm -rf .build/packages/packages; mkdir -p .build/packages/packages
             for archdir in dist/"$ver"/*/; do
@@ -145,13 +147,11 @@ jobs:
               mkdir -p ".build/packages/packages/$arch"
               cp "$archdir"/*.apk ".build/packages/packages/$arch/"
             done
-            arches=$(ls .build/packages/packages)
-            lastarch=$(echo "$arches" | tail -1)
-            for arch in $arches; do
-              if [ "$ver" = "$lastver" ] && [ "$arch" = "$lastarch" ]; then
-                ALPINE_VER="$ver" BACKEND=pages PUBLISH_PUSH=1 ./bin/publish "$pkg" "$arch"
-              else
-                ALPINE_VER="$ver" BACKEND=local ./bin/publish "$pkg" "$arch"
-              fi
+            for arch in $(ls .build/packages/packages); do
+              ALPINE_VER="$ver" BACKEND=local ./bin/publish "$pkg" "$arch"
             done
           done
+          # One signed upload of the whole site/ tree (every version × arch) to the
+          # shared S3 bucket behind CloudFront. BACKEND=s3 syncs $REPO/site/ in full.
+          lastarch=$(ls .build/packages/packages | tail -1)
+          ALPINE_VER="$lastver" BACKEND=s3 ./bin/publish "$pkg" "$lastarch"

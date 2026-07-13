@@ -95,7 +95,39 @@ case "$BACKEND" in
 					echo "publish: prepared gh-pages commit (set PUBLISH_PUSH=1 + GITHUB_TOKEN + PUBLISH_ORIGIN=https://... to push)"
 				fi'
 		;;
-	forgejo|web|s3)
-		echo "publish: TODO push site/ to backend '$BACKEND' (registry / rsync / object store)" >&2 ;;
+	s3)
+		# Sync the assembled site/ tree to S3 (fronted by CloudFront). NO infra is
+		# created here — the bucket + CDN already exist; we only write under a
+		# prefix on a shared bucket. Creds come from the env (standard
+		# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY); region from AWS_DEFAULT_REGION
+		# or AWS_MMEDIA_REGION. Full target incl. prefix from PUBLISH_S3_TARGET,
+		# e.g. s3://mmedia-stage.capturehighered.net/apk. Runs on the host (aws CLI
+		# is preinstalled on GH runners), after the container assemble/sign above.
+		: "${PUBLISH_S3_TARGET:?set PUBLISH_S3_TARGET=s3://<bucket>/<prefix>}"
+		# Safety: NEVER sync/--delete a bucket root on a shared bucket — the target
+		# MUST carry a non-empty prefix path so --delete is scoped to our namespace.
+		case "$PUBLISH_S3_TARGET" in
+			s3://*/?*) : ;;
+			*) die "PUBLISH_S3_TARGET must be s3://<bucket>/<prefix> (refusing a bucket root)" ;;
+		esac
+		command -v aws >/dev/null 2>&1 || die "need aws CLI for the s3 backend"
+		export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-${AWS_MMEDIA_REGION:-}}"
+		[ -n "$AWS_DEFAULT_REGION" ] || die "set AWS_DEFAULT_REGION or AWS_MMEDIA_REGION"
+		target=${PUBLISH_S3_TARGET%/}
+		echo "publish: syncing site/ -> $target/ (region $AWS_DEFAULT_REGION)"
+		# 1) immutable apks: long cache. --delete mirrors the local retain policy,
+		#    scoped to our prefix so it never touches other content on the bucket.
+		aws s3 sync "$REPO/site/" "$target/" --delete \
+			--exclude '*/APKINDEX.tar.gz' --exclude 'keyring/*' \
+			--cache-control 'public,max-age=31536000,immutable'
+		# 2) mutable index + keyring: no-cache so CloudFront/clients always refetch
+		#    (we may not hold cloudfront:CreateInvalidation on the shared dist).
+		aws s3 sync "$REPO/site/" "$target/" \
+			--exclude '*' --include '*/APKINDEX.tar.gz' --include 'keyring/*' \
+			--cache-control 'no-cache'
+		echo "publish: published -> https://$(printf %s "$target" | sed 's#^s3://##')/"
+		;;
+	forgejo|web)
+		echo "publish: TODO push site/ to backend '$BACKEND' (registry / rsync)" >&2 ;;
 	*) die "unknown backend: $BACKEND" ;;
 esac

@@ -32,6 +32,7 @@ jobs:
       OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
       OPENAI_API_KEY:  ${{ secrets.OPENAI_API_KEY }}
       FIXLOOP_MODEL:   ${{ vars.FIXLOOP_MODEL }}
+      FIXLOOP_MAX_SPEND_USD: ${{ vars.FIXLOOP_MAX_SPEND_USD }}   # per-package per-run USD ceiling
       # `secrets` can't be used in an `if:`; surface presence as a job env flag.
       HAS_SIGNING_KEY: ${{ secrets.ABUILD_ACTIVE_KEY != '' }}
       ALPINE_VER: ${{ inputs.alpine }}    # target Alpine release for build + verify

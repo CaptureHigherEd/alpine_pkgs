@@ -21,16 +21,17 @@ in the `snowflake/` spike; see `packages/php83-pdo_snowflake/README.md`.
 
 ```sh
 # trust our signing keyring
-for k in <keyid>.rsa.pub; do
-    wget -O /etc/apk/keys/$k https://apk.<domain>/keyring/$k
+for k in domains@capturehighered.com-6a521812.rsa.pub; do
+    wget -O /etc/apk/keys/$k https://mmedia-stage.capturehighered.net/apk/keyring/$k
 done
 # add the repo
-echo "https://apk.<domain>/v3.22/main" >> /etc/apk/repositories
+echo "https://mmedia-stage.capturehighered.net/apk/v3.22/main" >> /etc/apk/repositories
 apk update && apk add php83-pdo_snowflake
 ```
 
-Verify signatures per `SECURITY.md`. The canonical URL is a custom domain
-(`apk.<domain>`), not a GitHub URL — so the backend can move without breaking you.
+Verify signatures per `SECURITY.md`. The repo is served via CloudFront at
+`mmedia-stage.capturehighered.net` under the `/apk` prefix — a CDN URL, not a raw
+GitHub URL, so the S3 origin can move without breaking consumers.
 
 ## Building locally
 

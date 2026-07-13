@@ -30,7 +30,12 @@ jobs:
           name=$(basename "$(ls keys/keyring/*.rsa.pub | head -1)" .pub)
           printf '%s' "${{ secrets.ABUILD_ACTIVE_KEY }}" > ".build/keys/$name"
           cp "keys/keyring/$name.pub" ".build/keys/$name.pub"
-      - name: Publish (prune -> index -> sign -> keyring)
-        run: ./bin/publish "${{ inputs.package }}"
-      # TODO(Phase 1): push site/ to gh-pages served at apk.<domain> (custom-domain
-      #   CNAME = the portability anchor). See auto/build-pipeline.md §6.
+      - name: Publish (prune -> index -> sign -> sync to S3/CloudFront)
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_MAIN_MMEDIA_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_MAIN_MMEDIA_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION:    ${{ vars.AWS_MMEDIA_REGION }}
+          PUBLISH_S3_TARGET:     ${{ vars.PUBLISH_S3_TARGET }}
+        run: BACKEND=s3 ./bin/publish "${{ inputs.package }}"
+      # Served via CloudFront at mmedia-stage.capturehighered.net/apk (shared
+      # bucket, /apk prefix). See auto/build-pipeline.md §6.
