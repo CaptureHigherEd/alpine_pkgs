@@ -101,6 +101,14 @@ build() {
 	# with vanilla flags, exactly like the proven Dockerfile spike. (Re-hardening
 	# these old vendored deps is a Phase 4 concern.)
 	unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS FFLAGS FCFLAGS
+	# abuild's default.conf exports CMAKE_GENERATOR=Ninja for the whole build env,
+	# but the vendored upstream scripts (build_awssdk.sh, build_azuresdk.sh, ...)
+	# configure with cmake and then build with `make` — which finds no Makefile
+	# against Ninja build files ("No targets specified and no makefile found"),
+	# so every cmake dep silently fails to produce its archive. The proven spike
+	# ran via a plain Dockerfile (no abuild, no Ninja default) so cmake used Unix
+	# Makefiles. Force that here so the scripts' make/make install work.
+	export CMAKE_GENERATOR="Unix Makefiles"
 	export MAKEFLAGS=-j$(nproc)
 	# Documented upstream flow; ARROW_FROM_SOURCE=1 is the default in _init.sh.
 	bash scripts/build_dependencies.sh -t Release

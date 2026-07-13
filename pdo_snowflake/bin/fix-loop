@@ -48,8 +48,10 @@ gen_patch() {
 			&& [ -n "${FIXLOOP_MODEL:-}" ] || die "api provider needs OPENAI_BASE_URL/_API_KEY/FIXLOOP_MODEL"
 		sys=$(cat "$REPO/llm/prompts/musl-fix.md")
 		usr=$(cat)
+		# NB: no `temperature` — GPT-5-era reasoning models (e.g. gpt-5.6-sol)
+		# reject any non-default temperature with HTTP 400; the default is fine.
 		jq -n --arg m "$FIXLOOP_MODEL" --arg s "$sys" --arg u "$usr" \
-			'{model:$m, temperature:0, messages:[{role:"system",content:$s},{role:"user",content:$u}]}' \
+			'{model:$m, messages:[{role:"system",content:$s},{role:"user",content:$u}]}' \
 		| curl -fsS -m 120 "$OPENAI_BASE_URL/chat/completions" \
 			-H "Authorization: Bearer $OPENAI_API_KEY" -H "content-type: application/json" -d @- \
 		| jq -r '.choices[0].message.content' \

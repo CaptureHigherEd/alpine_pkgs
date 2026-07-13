@@ -28,9 +28,12 @@ permissions:
 
 jobs:
   # Build matrix scoped by branch:
-  #   main            -> FULL: every supported Alpine (3.21-3.24) × x86_64 + aarch64
-  #   development/PR  -> MINIMAL: newest Alpine only, x86_64 only (fast feedback)
-  # Update the version list below as releases EOL / ship (3.20 EOL 2026-04-01).
+  #   main            -> FULL: Alpine 3.22 × x86_64 + aarch64
+  #   development/PR  -> MINIMAL: Alpine 3.22 × x86_64 only (fast feedback)
+  # Pinned to 3.22 — the toolchain the spike proved. 3.23/3.24 (GCC 15) need
+  # missing-#include patches across the vendored deps before they can rejoin the
+  # matrix (see the 3.23/3.24 porting task); widen the version list here once that
+  # lands.
   discover:
     runs-on: ubuntu-latest
     defaults:
@@ -46,9 +49,9 @@ jobs:
         run: |
           pkgs=$(ls -d packages/*/ | xargs -n1 basename)
           if [ "$FULL" = "true" ]; then
-            alpines="3.21 3.22 3.23 3.24"; runners="ubuntu-latest ubuntu-24.04-arm"
+            alpines="3.22"; runners="ubuntu-latest ubuntu-24.04-arm"
           else
-            alpines="3.24"; runners="ubuntu-latest"     # newest only, x86_64
+            alpines="3.22"; runners="ubuntu-latest"     # x86_64 only
           fi
           matrix=$(for p in $pkgs; do for a in $alpines; do for r in $runners; do
             jq -cn --arg p "$p" --arg a "$a" --arg r "$r" '{package:$p,alpine:$a,runner:$r}'
