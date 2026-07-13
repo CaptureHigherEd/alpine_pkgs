@@ -30,7 +30,8 @@ subpackages="libsnowflakeclient-static:_client_static
 source="60_pdo_snowflake.ini
         001-sf-fopen-no-lfs64-on-musl.patch
         002-cmocka-musl-uintptr_t.patch
-        003-build_arrow-sourced-exit-skips-tomlplusplus.patch"
+        003-build_arrow-sourced-exit-skips-tomlplusplus.patch
+        004-cmocka-cmake4-drop-cmp0026-location.patch"
 options="net"                  # dep builds + source clones fetch over the network
 builddir="$srcdir/sfclient"
 
@@ -110,6 +111,45 @@ build() {
 	# Makefiles. Force that here so the scripts' make/make install work.
 	export CMAKE_GENERATOR="Unix Makefiles"
 	export MAKEFLAGS=-j$(nproc)
+	# GCC 15 (Alpine 3.23+) no longer transitively includes <cstdint>, so vendored
+	# deps that use int64_t/uint64_t without including it fail to compile
+	# ("'int64_t' has not been declared"). Force-include it into every C++ TU via a
+	# g++/c++ shim on PATH + $CXX — build-script-agnostic, covering aws/arrow/azure/
+	# boost without per-dep patches. Scoped to >= 3.23 so the proven 3.22 path is
+	# untouched; C/assembly compiles are NOT shimmed (avoids breaking the crypto
+	# deps' .s files). Widen/adjust as further GCC-15 breakage surfaces.
+	case "$ALPINE_VER" in
+	3.1?|3.2[0-2]) : ;;                       # older GCC/CMake — no shims needed
+	*)
+		_shim="$srcdir/ccshim"; mkdir -p "$_shim"
+		# C++ shim: force-include <cstdint> — GCC 15 no longer pulls it in
+		# transitively, so vendored code using int64_t etc. fails to compile.
+		for _cxx in g++ c++; do
+			printf '#!/bin/sh\nexec /usr/bin/g++ -include cstdint "$@"\n' > "$_shim/$_cxx"
+		done
+		# C shim: downgrade the C diagnostics GCC 14 promoted to hard errors back to
+		# warnings (appended so they win over any -Werror the project sets). Old
+		# vendored/test C code (e.g. libsnowflakeclient's cmocka tests) trips
+		# -Wincompatible-pointer-types. No -include here, so assembly compiles in the
+		# crypto deps stay clean.
+		for _cc in gcc cc; do
+			printf '#!/bin/sh\nexec /usr/bin/gcc "$@" -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=implicit-int -Wno-error=return-mismatch\n' > "$_shim/$_cc"
+		done
+		# Alpine 3.24's php83-dev dropped the unversioned phpize/php-config symlinks
+		# (only phpize83/php-config83 remain); pdo_snowflake's build_pdo_snowflake.sh
+		# calls the unversioned names via PATH. Bridge them.
+		for _php in phpize php-config; do
+			printf '#!/bin/sh\nexec /usr/bin/%s83 "$@"\n' "$_php" > "$_shim/$_php"
+		done
+		chmod +x "$_shim"/*
+		export PATH="$_shim:$PATH" CC="$_shim/gcc" CXX="$_shim/g++"
+		# CMake 4 (Alpine 3.23+) removed compatibility with projects declaring
+		# cmake_minimum_required < 3.5. Old vendored deps + arrow's external
+		# projects (xsimd_ep) trip this; CMake honors this env var to raise the
+		# floor without editing each project.
+		export CMAKE_POLICY_VERSION_MINIMUM=3.5
+		;;
+	esac
 	# Documented upstream flow; ARROW_FROM_SOURCE=1 is the default in _init.sh.
 	bash scripts/build_dependencies.sh -t Release
 	_assert_dep_artifacts
@@ -169,4 +209,5 @@ ece7ce7862b5428375eeaec9c0d50508b730db8cf9893cdbdccdbf6e377dc91a3ee9f9ef1f8e7996
 4387057c122866416bc02c80c679e579c3c7e501cfea201f6471f81a9eb379ec34580019a2b26ad06e7c4a430a6b6f95d315b9cb59a60e98d434b661f7d6cdfd  001-sf-fopen-no-lfs64-on-musl.patch
 ae6d1f80d62ef65b2e7cbcd0295826d75fd0b413ef72357d018159be17895d155bfe864c9bec04ae0e0ffd06212bab52cda65d77201dc22be84db2aa4f6e4be3  002-cmocka-musl-uintptr_t.patch
 e8a41aaae48fa195862f70d282c00536385c7d8e6cf207393d21542cc466e992a5507f0797a663045cf0a9704240c5c10c3778f5d7d4beb8ecff8c5427410031  003-build_arrow-sourced-exit-skips-tomlplusplus.patch
+21f5adef1c6e7e1769f3f76b33532e6a3f6ffb03d50527702a5bc990614088da5a346d173b453a1bd120bdb73b29521d01aeb7b9482a02b2acf49123fc1d105e  004-cmocka-cmake4-drop-cmp0026-location.patch
 "
