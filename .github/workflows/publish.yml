@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: Builder      # ABUILD_ACTIVE_KEY + AWS_MAIN_MMEDIA_* creds live here
     defaults:
       run:

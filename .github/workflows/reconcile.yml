@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   reconcile:
-    runs-on: ubuntu-latest      # light job — no build here
+    runs-on: ubuntu-24.04      # light job — no build here
     defaults:
       run:
         working-directory: pdo_snowflake
