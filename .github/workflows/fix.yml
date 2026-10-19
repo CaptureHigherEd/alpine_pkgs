@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   fix:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: Builder      # OPENAI_API_KEY (+ ABUILD_ACTIVE_KEY) live here
     defaults:
       run:

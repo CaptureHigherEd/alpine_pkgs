@@ -1,6 +1,6 @@
 # Build one package + gates, with the LLM build-doctor on the failure path.
 # Reusable across package projects in the monorepo: `dir` is the project subdir
-# (e.g. pdo_snowflake) that all run steps execute inside. Runs on ubuntu-latest:
+# (e.g. pdo_snowflake) that all run steps execute inside. Runs on ubuntu-24.04:
 # bin/build-package spins its own alpine container.
 name: build
 on:
@@ -8,7 +8,7 @@ on:
     inputs:
       dir:     { type: string, required: false, default: pdo_snowflake }
       package: { type: string, required: true, default: php83-pdo_snowflake }
-      runner:  { type: string, required: false, default: ubuntu-latest }
+      runner:  { type: string, required: false, default: ubuntu-24.04 }
       alpine:  { type: string, required: false, default: "3.22" }
     # Signing/model secrets come from the `Builder` environment (see the job's
     # `environment:` below), not from the caller — so they are NOT declared here.
@@ -16,12 +16,12 @@ on:
     inputs:
       dir:     { type: string, required: false, default: pdo_snowflake }
       package: { type: string, required: true, default: php83-pdo_snowflake }
-      runner:  { type: string, required: false, default: ubuntu-latest }
+      runner:  { type: string, required: false, default: ubuntu-24.04 }
       alpine:  { type: string, required: false, default: "3.22" }
 
 jobs:
   build:
-    runs-on: ${{ inputs.runner }}     # ubuntu-latest (x86_64) or ubuntu-24.04-arm (aarch64)
+    runs-on: ${{ inputs.runner }}     # ubuntu-24.04 (x86_64) or ubuntu-24.04-arm (aarch64)
     # Access the `Builder` environment's secrets (ABUILD_ACTIVE_KEY, OPENAI_API_KEY).
     # A reusable-workflow CALLER job can't set `environment:`, so it lives here on
     # the actual build job. Configure Builder for "All branches" (no protection

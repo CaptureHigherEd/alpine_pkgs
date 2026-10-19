@@ -34,7 +34,7 @@ jobs:
   # package APKBUILD (build() scopes them to >= 3.23). All three verified building
   # from source locally. Update the version list as releases EOL / ship.
   discover:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: pdo_snowflake
@@ -48,9 +48,9 @@ jobs:
         run: |
           pkgs=$(ls -d packages/*/ | xargs -n1 basename)
           if [ "$FULL" = "true" ]; then
-            alpines="3.22 3.23 3.24"; runners="ubuntu-latest ubuntu-24.04-arm"
+            alpines="3.22 3.23 3.24"; runners="ubuntu-24.04 ubuntu-24.04-arm"
           else
-            alpines="3.24"; runners="ubuntu-latest"     # newest only, x86_64
+            alpines="3.24"; runners="ubuntu-24.04"     # newest only, x86_64
           fi
           matrix=$(for p in $pkgs; do for a in $alpines; do for r in $runners; do
             jq -cn --arg p "$p" --arg a "$a" --arg r "$r" '{package:$p,alpine:$a,runner:$r}'
@@ -119,7 +119,7 @@ jobs:
   publish:
     needs: [build, e2e]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: Builder       # ABUILD_ACTIVE_KEY + AWS_MAIN_MMEDIA_* creds
     permissions:
       contents: read           # publish writes to S3/CloudFront, not git
